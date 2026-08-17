@@ -10,7 +10,8 @@
 		"check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
 		"check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
 		"lint": "prettier --check . && eslint .",
-		"format": "prettier --write ."
+		"format": "prettier --write .",
+		"test": "node --experimental-strip-types --test src/lib/**/*.test.ts"
 	},
 	"files": [
 		"dist",
@@ -54,5 +55,8 @@
 	},
 	"keywords": [
 		"svelte"
-	]
+	],
+	"dependencies": {
+		"dropbox": "^10.45.0"
+	}
 }
