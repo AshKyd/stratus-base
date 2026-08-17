@@ -25,14 +25,14 @@
 				<span class="action-link">Open Tester →</span>
 			</a>
 
-			<div class="backend-card coming-soon">
+			<a href="/test/google-drive" class="backend-card">
 				<div class="card-header">
 					<span class="icon">🤖</span>
 					<h3>Google Drive</h3>
 				</div>
-				<p class="card-desc">Future support for Google Drive file storage using OAuth 2.0 PKCE.</p>
-				<span class="badge">Coming Soon</span>
-			</div>
+				<p class="card-desc">Test authorization code flow with PKCE, token refresh, and atomic write-then-rename files operations on Google Drive.</p>
+				<span class="action-link">Open Tester →</span>
+			</a>
 
 			<div class="backend-card coming-soon">
 				<div class="card-header">

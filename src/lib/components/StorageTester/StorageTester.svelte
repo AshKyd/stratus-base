@@ -67,11 +67,31 @@
 		// Handle OAuth callback if present in URL
 		const params = new URLSearchParams(window.location.search);
 		const code = params.get('code');
+		const hashParams = new URLSearchParams(window.location.hash.substring(1));
+		const accessToken = hashParams.get('access_token');
+
 		if (code && backend.exchangeCode) {
 			try {
 				showMsg('Exchanging authorization code...', 'info');
 				const credentials = await backend.exchangeCode(code, calculatedRedirectUri);
 				localStorage.setItem(`tester_creds_${backend.id}`, JSON.stringify(credentials));
+				isConfigured = true;
+				showMsg('Authenticated successfully!', 'success');
+				window.history.replaceState({}, '', window.location.pathname);
+			} catch (err: any) {
+				showMsg(`Authentication failed: ${err.message || err}`, 'error');
+			}
+		} else if (accessToken) {
+			try {
+				const expiresSeconds = Number(hashParams.get('expires_in') || 3600);
+				const credentials = {
+					accessToken,
+					expiresAt: Date.now() + expiresSeconds * 1000
+				};
+				localStorage.setItem(`tester_creds_${backend.id}`, JSON.stringify(credentials));
+				if (backend.setCredentials) {
+					backend.setCredentials(credentials);
+				}
 				isConfigured = true;
 				showMsg('Authenticated successfully!', 'success');
 				window.history.replaceState({}, '', window.location.pathname);
@@ -230,6 +250,15 @@
 								class="setup-link"
 							>
 								Open App Settings on Dropbox ↗
+							</a>
+						{:else if backend.id === 'google-drive'}
+							<a
+								href="https://console.cloud.google.com/apis/credentials"
+								target="_blank"
+								rel="noopener noreferrer"
+								class="setup-link"
+							>
+								Open Credentials page on Google Cloud ↗
 							</a>
 						{/if}
 					</div>
