@@ -34,6 +34,15 @@
 				<span class="action-link">Open Tester →</span>
 			</a>
 
+			<a href="/test/github" class="backend-card">
+				<div class="card-header">
+					<span class="icon">🐙</span>
+					<h3>GitHub Storage</h3>
+				</div>
+				<p class="card-desc">Test client-side file reading, writing (standard & atomic), listing, and renames using GitHub Personal Access Tokens (PAT).</p>
+				<span class="action-link">Open Tester →</span>
+			</a>
+
 			<div class="backend-card coming-soon">
 				<div class="card-header">
 					<span class="icon">☁️</span>
