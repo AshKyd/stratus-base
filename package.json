@@ -11,7 +11,8 @@
 		"check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
 		"lint": "prettier --check . && eslint .",
 		"format": "prettier --write .",
-		"test": "node --experimental-strip-types --test src/lib/**/*.test.ts"
+		"test": "node --experimental-strip-types --test src/lib/*.test.ts src/lib/**/*.test.ts",
+		"test:browser": "vitest run --config vitest.config.ts"
 	},
 	"files": [
 		"dist",
@@ -40,6 +41,7 @@
 		"@sveltejs/package": "^2.5.8",
 		"@sveltejs/vite-plugin-svelte": "^7.1.2",
 		"@types/node": "^24",
+		"@vitest/browser-playwright": "^4.1.10",
 		"eslint": "^10.4.1",
 		"eslint-config-prettier": "^10.1.8",
 		"eslint-plugin-svelte": "^3.19.0",
@@ -59,7 +61,10 @@
 	],
 	"dependencies": {
 		"@aws-sdk/client-s3": "^3.1111.0",
+		"@vitest/browser": "^4.1.10",
 		"dropbox": "^10.45.0",
-		"s3rver": "^3.7.1"
+		"playwright": "^1.62.1",
+		"s3rver": "^3.7.1",
+		"vitest": "^4.1.10"
 	}
 }

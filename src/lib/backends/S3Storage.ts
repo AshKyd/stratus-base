@@ -8,30 +8,57 @@ import {
 	CopyObjectCommand,
 	NoSuchKey
 } from '@aws-sdk/client-s3';
-import type {
-	StorageBackend,
-	StorageFileInfo,
-	StorageAuthCredentials,
-	StorageOperation,
-	WriteOptions
-} from '../types.ts';
+import type { StorageBackend, StorageFileInfo, StorageOperation, WriteOptions } from '../types.ts';
 import { BaseStorageOperation } from '../utils/BaseStorageOperation.ts';
 
+/**
+ * Configuration options for initializing the S3 storage backend.
+ */
 export interface S3StorageOptions {
+	/**
+	 * AWS access key ID.
+	 */
 	accessKeyId: string;
+	/**
+	 * AWS secret access key.
+	 */
 	secretAccessKey: string;
+	/**
+	 * Optional AWS session token for temporary credentials.
+	 */
 	sessionToken?: string;
+	/**
+	 * The AWS region where the bucket is located.
+	 */
 	region: string;
+	/**
+	 * The name of the S3 bucket.
+	 */
 	bucket: string;
+	/**
+	 * Optional custom endpoint URL (e.g., for MinIO or LocalStack).
+	 */
 	endpoint?: string;
+	/**
+	 * Whether to force path-style URLs (bucket in path instead of subdomain).
+	 */
 	forcePathStyle?: boolean;
 }
 
+/**
+ * StorageBackend implementation for AWS S3 and S3-compatible APIs.
+ * Supports standard CRUD operations and custom endpoints.
+ */
 export class S3Storage implements StorageBackend {
 	readonly id = 's3';
 	private options: S3StorageOptions;
 	private client: S3Client;
 
+	/**
+	 * Initialises the S3 storage client with the provided options.
+	 *
+	 * @param options The configuration options for S3 storage.
+	 */
 	constructor(options: S3StorageOptions) {
 		this.options = options;
 		this.client = new S3Client({
@@ -46,20 +73,44 @@ export class S3Storage implements StorageBackend {
 		});
 	}
 
+	/**
+	 * Checks if the backend has valid configuration to perform storage operations.
+	 *
+	 * @returns A promise resolving to true if configured, or false otherwise.
+	 */
 	async isConfigured(): Promise<boolean> {
 		return !!(this.options.accessKeyId && this.options.secretAccessKey && this.options.bucket);
 	}
 
+	/**
+	 * Normalises a file path to a standard S3 key.
+	 * Strips the leading slash for standard S3 conventions.
+	 *
+	 * @param path The path to normalise.
+	 * @returns The normalised S3 key.
+	 */
 	private normalizeKey(path: string): string {
 		// S3 keys should not start with a leading slash unless desired, but usually they are relative to bucket root.
 		// Let's strip the leading slash for standard S3 conventions.
 		return path.startsWith('/') ? path.slice(1) : path;
 	}
 
+	/**
+	 * Denormalises an S3 key back to a standard file path starting with a slash.
+	 *
+	 * @param key The S3 key to denormalise.
+	 * @returns The denormalised path.
+	 */
 	private denormalizeKey(key: string): string {
 		return key.startsWith('/') ? key : '/' + key;
 	}
 
+	/**
+	 * Retrieves metadata for a file or directory at the specified path.
+	 *
+	 * @param path The path to query.
+	 * @returns A promise resolving to the file info, or null if it does not exist.
+	 */
 	async stat(path: string): Promise<StorageFileInfo | null> {
 		const key = this.normalizeKey(path);
 
@@ -99,7 +150,9 @@ export class S3Storage implements StorageBackend {
 					const name = segments[segments.length - 1];
 					const parentPath = '/' + segments.slice(0, -1).join('/');
 					const parentListing = await this.listDirectory(parentPath);
-					const match = parentListing.find((item) => item.name === name && item.type === 'directory');
+					const match = parentListing.find(
+						(item) => item.name === name && item.type === 'directory'
+					);
 					if (match) {
 						return match;
 					}
@@ -123,6 +176,13 @@ export class S3Storage implements StorageBackend {
 		}
 	}
 
+	/**
+	 * Reads file contents from the S3 bucket.
+	 * Supports progress callbacks and client-side cancellation.
+	 *
+	 * @param path The path of the file to read.
+	 * @returns A storage operation containing the file data as a Uint8Array.
+	 */
 	readFile(path: string): StorageOperation<Uint8Array> {
 		const key = this.normalizeKey(path);
 		return new BaseStorageOperation(async (signal, onProgress) => {
@@ -169,6 +229,15 @@ export class S3Storage implements StorageBackend {
 		});
 	}
 
+	/**
+	 * Writes content to a file in the S3 bucket.
+	 * Supports atomic writes via a temporary file when requested.
+	 *
+	 * @param path The path to write to.
+	 * @param content The byte contents of the file.
+	 * @param options Optional configuration like atomic write flag.
+	 * @returns A storage operation that resolves when the write completes.
+	 */
 	writeFile(path: string, content: Uint8Array, options?: WriteOptions): StorageOperation<void> {
 		const key = this.normalizeKey(path);
 		return new BaseStorageOperation(async (signal) => {
@@ -218,6 +287,12 @@ export class S3Storage implements StorageBackend {
 		});
 	}
 
+	/**
+	 * Deletes a file or recursively deletes a directory at the specified path.
+	 *
+	 * @param path The path to delete.
+	 * @returns A promise resolving when deletion is complete.
+	 */
 	async deleteFile(path: string): Promise<void> {
 		const key = this.normalizeKey(path);
 
@@ -264,6 +339,12 @@ export class S3Storage implements StorageBackend {
 		}
 	}
 
+	/**
+	 * Lists all files and subdirectories directly inside the specified directory path.
+	 *
+	 * @param path The directory path to list.
+	 * @returns A promise resolving to an array of file and directory metadata.
+	 */
 	async listDirectory(path: string): Promise<StorageFileInfo[]> {
 		const rawKey = this.normalizeKey(path);
 		const prefix = rawKey === '' ? '' : rawKey.endsWith('/') ? rawKey : rawKey + '/';
@@ -318,6 +399,13 @@ export class S3Storage implements StorageBackend {
 		return files;
 	}
 
+	/**
+	 * Renames (moves) a file within the S3 bucket by copying to the new path and deleting the old.
+	 *
+	 * @param oldPath The current path of the file.
+	 * @param newPath The destination path.
+	 * @returns A promise resolving when the rename completes.
+	 */
 	async renameFile(oldPath: string, newPath: string): Promise<void> {
 		const oldKey = this.normalizeKey(oldPath);
 		const newKey = this.normalizeKey(newPath);
