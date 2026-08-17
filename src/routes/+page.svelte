@@ -43,14 +43,14 @@
 				<span class="action-link">Open Tester →</span>
 			</a>
 
-			<div class="backend-card coming-soon">
+			<a href="/test/s3" class="backend-card">
 				<div class="card-header">
 					<span class="icon">☁️</span>
 					<h3>Amazon S3 / R2</h3>
 				</div>
-				<p class="card-desc">Future support for Amazon S3 or Cloudflare R2 backends using key-based configurations.</p>
-				<span class="badge">Coming Soon</span>
-			</div>
+				<p class="card-desc">Test client-side file reading, writing (standard & atomic), listing, and renames using Amazon S3 or Cloudflare R2 backends.</p>
+				<span class="action-link">Open Tester →</span>
+			</a>
 		</div>
 	</section>
 </main>

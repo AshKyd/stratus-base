@@ -58,6 +58,8 @@
 		"svelte"
 	],
 	"dependencies": {
-		"dropbox": "^10.45.0"
+		"@aws-sdk/client-s3": "^3.1111.0",
+		"dropbox": "^10.45.0",
+		"s3rver": "^3.7.1"
 	}
 }
