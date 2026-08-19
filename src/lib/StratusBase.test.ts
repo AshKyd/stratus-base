@@ -14,7 +14,7 @@ class MockWritableFileStream {
 		if (typeof data === 'string') {
 			this.file.content = new TextEncoder().encode(data);
 		} else if (data instanceof Uint8Array) {
-			this.file.content = data;
+			this.file.content = data as any;
 		} else {
 			this.file.content = new Uint8Array(data);
 		}

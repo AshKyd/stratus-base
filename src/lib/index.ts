@@ -15,8 +15,11 @@ export type {
 	StratusBaseOptions
 } from './StratusBase.ts';
 
-export { MiddlewareIndividualFile } from './MiddlewareIndividualFile.ts';
-export type { MiddlewareIndividualFileOptions } from './MiddlewareIndividualFile.ts';
+export { MiddlewareIndividualFile } from './middleware/MiddlewareIndividualFile/MiddlewareIndividualFile.ts';
+export type { MiddlewareIndividualFileOptions } from './middleware/MiddlewareIndividualFile/MiddlewareIndividualFile.ts';
+
+export { MiddlewareZipChunk } from './middleware/MiddlewareZipChunk/MiddlewareZipChunk.ts';
+export type { MiddlewareZipChunkOptions } from './middleware/MiddlewareZipChunk/MiddlewareZipChunk.ts';
 
 export { MemoryStorage } from './backends/MemoryStorage.ts';
 

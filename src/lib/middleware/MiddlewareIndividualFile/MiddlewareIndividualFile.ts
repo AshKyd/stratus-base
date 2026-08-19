@@ -1,14 +1,14 @@
 import type {
 	StorageBackend,
 	StorageFileInfo
-} from './types.ts';
+} from '../../types.ts';
 import type {
 	StratusMiddleware,
 	StratusSyncContext,
 	SyncConflict,
 	SyncResult
-} from './StratusBase.ts';
-import { SyncConflictError } from './StratusBase.ts';
+} from '../../StratusBase.ts';
+import { SyncConflictError } from '../../StratusBase.ts';
 
 export interface MiddlewareIndividualFileOptions {
 	atomic?: boolean;

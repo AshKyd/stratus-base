@@ -16,8 +16,20 @@ export interface FileMetadata {
 	status: 'clean' | 'dirty' | 'deleted' | 'conflict';
 }
 
+export interface ChunkFileMetadata {
+	size: number;
+	modifiedAt: number;
+}
+
+export interface ChunkMetadata {
+	uncompressedSize: number;
+	files: Record<string, ChunkFileMetadata>;
+	deleted?: string[];
+}
+
 export interface StratusMetadata {
 	files: Record<string, FileMetadata>;
+	chunks?: Record<string, ChunkMetadata>;
 }
 
 export interface SyncConflict {
@@ -200,7 +212,7 @@ export class StratusBase {
 
 					const fileHandle = await this.getFileHandle(path, { create: true });
 					const writable = await fileHandle.createWritable();
-					await writable.write(content);
+					await writable.write(content as BufferSource);
 					await writable.close();
 
 					return content;
@@ -214,7 +226,7 @@ export class StratusBase {
 		return new BaseStorageOperation<void>(async () => {
 			const fileHandle = await this.getFileHandle(path, { create: true });
 			const writable = await fileHandle.createWritable();
-			await writable.write(content);
+			await writable.write(content as BufferSource);
 			await writable.close();
 
 			const metadata = await this.getMetadata();
@@ -348,7 +360,7 @@ export class StratusBase {
 			writeLocalFile: async (path, content) => {
 				const handle = await this.getFileHandle(path, { create: true });
 				const writable = await handle.createWritable();
-				await writable.write(content);
+				await writable.write(content as BufferSource);
 				await writable.close();
 			},
 			deleteLocalFile: async (path) => {
@@ -377,5 +389,53 @@ export class StratusBase {
 		};
 
 		return await this.middleware.sync(context);
+	}
+
+	async consolidate(): Promise<void> {
+		const context: StratusSyncContext = {
+			backend: this.backend,
+			localRoot: this.localRoot,
+			sparse: this.sparse,
+			getLocalMetadata: () => this.getMetadata(),
+			saveLocalMetadata: (meta) => this.saveMetadata(meta),
+			readLocalFile: async (path) => {
+				const handle = await this.getFileHandle(path);
+				const file = await handle.getFile();
+				return new Uint8Array(await file.arrayBuffer());
+			},
+			writeLocalFile: async (path, content) => {
+				const handle = await this.getFileHandle(path, { create: true });
+				const writable = await handle.createWritable();
+				await writable.write(content as BufferSource);
+				await writable.close();
+			},
+			deleteLocalFile: async (path) => {
+				try {
+					const contentRoot = await this.getContentRootHandle(false);
+					const segments = path.split('/').filter(Boolean);
+					const fileName = segments.pop();
+					if (fileName) {
+						const dir = await this.traverseDirectory(contentRoot, segments.join('/'), { create: false });
+						await dir.removeEntry(fileName);
+					}
+				} catch {
+					// File might already not exist locally
+				}
+			},
+			markClean: async (path, remoteModifiedAt, etag) => {
+				const meta = await this.getMetadata();
+				const existing = meta.files[path];
+				if (existing) {
+					existing.status = 'clean';
+					existing.remoteModifiedAt = remoteModifiedAt.getTime();
+					existing.etag = etag;
+					await this.saveMetadata(meta);
+				}
+			}
+		};
+
+		if (typeof (this.middleware as any).consolidate === 'function') {
+			await (this.middleware as any).consolidate(context);
+		}
 	}
 }

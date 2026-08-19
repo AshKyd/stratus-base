@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert';
 import { S3Storage } from './S3Storage.ts';
+// @ts-expect-error - s3rver doesn't provide types
 import S3rver from 's3rver';
 import { CreateBucketCommand, S3Client } from '@aws-sdk/client-s3';
 
@@ -19,7 +20,7 @@ test('S3Storage Integration Tests with s3rver', async (t) => {
 				address: 'localhost',
 				silent: true,
 				directory: './scratch/s3rver'
-			}).run((err) => {
+			}).run((err: any) => {
 				if (err) return reject(err);
 				resolve();
 			});

@@ -1,0 +1,652 @@
+import type {
+	StorageBackend
+} from '../../types.ts';
+import type {
+	StratusMiddleware,
+	StratusSyncContext,
+	SyncConflict,
+	SyncResult,
+	ChunkMetadata
+} from '../../StratusBase.ts';
+import { SyncConflictError } from '../../StratusBase.ts';
+import {
+	ZipReader,
+	ZipWriter,
+	Uint8ArrayReader,
+	Uint8ArrayWriter
+} from '@zip.js/zip.js';
+
+export interface MiddlewareZipChunkOptions {
+	chunkSizeLimit?: number; // Target chunk size limit, default 5MB
+	atomic?: boolean;        // Perform atomic writes on backend if supported
+}
+
+/**
+ * MiddlewareZipChunk splits and appends local changes into zip chunks of a target size (default 5MB).
+ * Both local metadata and ZIP archives maintain a mirrored ChunkMetadata structure.
+ */
+export class MiddlewareZipChunk implements StratusMiddleware {
+	private chunkSizeLimit: number;
+	private atomic: boolean;
+
+	constructor(options: MiddlewareZipChunkOptions = {}) {
+		this.chunkSizeLimit = options.chunkSizeLimit ?? 5 * 1024 * 1024;
+		this.atomic = options.atomic ?? false;
+	}
+
+	/**
+	 * Lists all remote chunks matching archive_chunk_*.zip, sorted numerically.
+	 */
+	private async listRemoteChunks(
+		backend: StorageBackend
+	): Promise<{ path: string; num: number; size: number; modifiedAt: Date }[]> {
+		const files = await backend.listDirectory('/');
+		const chunkRegex = /^archive_chunk_(\d+)\.zip$/;
+		return files
+			.filter((f) => f.type === 'file' && chunkRegex.test(f.name))
+			.map((f) => {
+				const match = f.name.match(chunkRegex);
+				return {
+					path: f.path,
+					num: match ? Number(match[1]) : 0,
+					size: f.size,
+					modifiedAt: f.modifiedAt
+				};
+			})
+			.sort((a, b) => a.num - b.num);
+	}
+
+	/**
+	 * Formats a chunk number as archive_chunk_XXX.zip.
+	 */
+	private formatChunkPath(num: number): string {
+		const padded = String(num).padStart(3, '0');
+		return `/archive_chunk_${padded}.zip`;
+	}
+
+	/**
+	 * Appends the _updates suffix to a filename for conflicts.
+	 */
+	private appendUpdatesSuffix(filePath: string): string {
+		const lastDot = filePath.lastIndexOf('.');
+		const lastSlash = filePath.lastIndexOf('/');
+		if (lastDot > lastSlash && lastDot !== -1) {
+			return filePath.slice(0, lastDot) + '_updates' + filePath.slice(lastDot);
+		}
+		return filePath + '_updates';
+	}
+
+	/**
+	 * Decodes zip bytes into a file content map.
+	 */
+	private async decodeZip(zipBytes: Uint8Array): Promise<Map<string, Uint8Array>> {
+		const filesMap = new Map<string, Uint8Array>();
+		if (zipBytes.length === 0) {
+			return filesMap;
+		}
+		const reader = new ZipReader(new Uint8ArrayReader(zipBytes));
+		const entries = await reader.getEntries();
+		await entries.reduce(async (promise, entry) => {
+			await promise;
+			if (entry.directory) return;
+			const content = await entry.getData(new Uint8ArrayWriter());
+			const filename = entry.filename === '.metadata.json'
+				? '.metadata.json'
+				: (entry.filename.startsWith('/') ? entry.filename : '/' + entry.filename);
+			filesMap.set(filename, content);
+		}, Promise.resolve());
+		await reader.close();
+		return filesMap;
+	}
+
+	/**
+	 * Encodes a file content map into a zip Uint8Array.
+	 */
+	private async encodeZip(filesMap: Map<string, Uint8Array>): Promise<Uint8Array> {
+		const writer = new Uint8ArrayWriter();
+		const zipWriter = new ZipWriter(writer);
+		await Array.from(filesMap.entries()).reduce(async (promise, [filename, content]) => {
+			await promise;
+			const entryName = filename.startsWith('/') ? filename.slice(1) : filename;
+			await zipWriter.add(entryName, new Uint8ArrayReader(content));
+		}, Promise.resolve());
+		await zipWriter.close();
+		return await writer.getData();
+	}
+
+	/**
+	 * Extracts and parses chunk metadata from a files map.
+	 */
+	private parseChunkMetadata(filesMap: Map<string, Uint8Array>): ChunkMetadata {
+		const metaBytes = filesMap.get('.metadata.json');
+		if (!metaBytes) {
+			return { uncompressedSize: 0, files: {}, deleted: [] };
+		}
+		try {
+			return JSON.parse(new TextDecoder().decode(metaBytes));
+		} catch {
+			return { uncompressedSize: 0, files: {}, deleted: [] };
+		}
+	}
+
+	/**
+	 * Encodes a files map and metadata into a ZIP and writes to the backend.
+	 */
+	private async writeChunk(
+		context: StratusSyncContext,
+		chunkPath: string,
+		filesMap: Map<string, Uint8Array>,
+		chunkMeta: ChunkMetadata
+	): Promise<void> {
+		const metaContent = new TextEncoder().encode(JSON.stringify(chunkMeta, null, 2));
+		filesMap.set('.metadata.json', metaContent);
+
+		const zipBytes = await this.encodeZip(filesMap);
+		const op = context.backend.writeFile(chunkPath, zipBytes, { atomic: this.atomic });
+		await op.finished;
+	}
+
+	/**
+	 * Downloads a remote chunk, extracts its entries, and handles conflicts.
+	 */
+	private async downloadAndExtractChunk(
+		context: StratusSyncContext,
+		rc: { path: string },
+		metadata: any,
+		conflicts: SyncConflict[],
+		created: string[],
+		updated: string[]
+	): Promise<void> {
+		const op = context.backend.readFile(rc.path);
+		const bytes = await op.finished;
+		const filesMap = await this.decodeZip(bytes);
+		const chunkMeta = this.parseChunkMetadata(filesMap);
+
+		// Store metadata in local cache
+		metadata.chunks![rc.path] = chunkMeta;
+
+		// Extract entries
+		const entries = Array.from(filesMap.entries()).filter(([name]) => name !== '.metadata.json');
+		await Promise.all(
+			entries.map(async ([path, content]) => {
+				const localFiles = metadata.files;
+				const localFile = localFiles[path];
+				const remoteFileMeta = chunkMeta.files[path];
+				const remoteModifiedAt = remoteFileMeta?.modifiedAt ?? Date.now();
+
+				const isLocalModified = localFile && (localFile.status === 'dirty' || localFile.status === 'deleted');
+
+				if (!isLocalModified) {
+					// Non-modified locally, safe to extract/lazy-load
+					if (context.sparse) {
+						localFiles[path] = {
+							path,
+							type: 'file',
+							size: content.length,
+							localModifiedAt: remoteModifiedAt,
+							remoteModifiedAt,
+							status: 'clean'
+						};
+						await context.deleteLocalFile(path); // Ensure clean OPFS state for lazy load
+					} else {
+						await context.writeLocalFile(path, content);
+						localFiles[path] = {
+							path,
+							type: 'file',
+							size: content.length,
+							localModifiedAt: remoteModifiedAt,
+							remoteModifiedAt,
+							status: 'clean'
+						};
+					}
+
+					if (!localFile) {
+						created.push(path);
+					} else {
+						updated.push(path);
+					}
+					return;
+				}
+
+				// Conflict check:
+				const remoteChanged = remoteModifiedAt > localFile.remoteModifiedAt;
+				if (!remoteChanged) {
+					// Remote is not newer, keep local changes.
+					return;
+				}
+
+				const updatesPath = this.appendUpdatesSuffix(path);
+				await context.writeLocalFile(updatesPath, content);
+
+				localFiles[path] = {
+					...localFile,
+					status: 'conflict',
+					remoteModifiedAt
+				};
+
+				localFiles[updatesPath] = {
+					path: updatesPath,
+					type: 'file',
+					size: content.length,
+					localModifiedAt: Date.now(),
+					remoteModifiedAt: 0,
+					status: 'clean'
+				};
+
+				conflicts.push({
+					path,
+					localModifiedAt: new Date(localFile.localModifiedAt),
+					remoteModifiedAt: new Date(remoteModifiedAt),
+					type: 'conflict'
+				});
+			})
+		);
+	}
+
+	/**
+	 * Initialises active chunk cache metadata, downloading if needed.
+	 */
+	private async initialiseActiveChunk(
+		context: StratusSyncContext,
+		activeChunkPath: string,
+		remoteChunks: { path: string }[],
+		chunksCache: Record<string, ChunkMetadata>
+	): Promise<ChunkMetadata> {
+		let activeChunk = chunksCache[activeChunkPath];
+		if (activeChunk) {
+			return activeChunk;
+		}
+
+		// Try downloading metadata of the active chunk if it exists but wasn't in cache
+		const activeExists = remoteChunks.some((c) => c.path === activeChunkPath);
+		if (activeExists) {
+			const op = context.backend.readFile(activeChunkPath);
+			const activeBytes = await op.finished;
+			const filesMap = await this.decodeZip(activeBytes);
+			activeChunk = this.parseChunkMetadata(filesMap);
+			chunksCache[activeChunkPath] = activeChunk;
+		}
+
+		if (!activeChunk) {
+			activeChunk = {
+				uncompressedSize: 0,
+				files: {},
+				deleted: []
+			};
+			chunksCache[activeChunkPath] = activeChunk;
+		}
+
+		return activeChunk;
+	}
+
+	/**
+	 * Appends local changes into the active remote chunk.
+	 */
+	private async appendToActiveChunk(
+		context: StratusSyncContext,
+		metadata: any,
+		activeChunkPath: string,
+		activeChunk: ChunkMetadata,
+		remoteChunks: { path: string }[],
+		dirtyPaths: string[],
+		deletedPaths: string[],
+		created: string[],
+		updated: string[],
+		deleted: string[]
+	): Promise<void> {
+		const localFiles = metadata.files;
+		const activeExists = remoteChunks.some((c) => c.path === activeChunkPath);
+		let filesMap = new Map<string, Uint8Array>();
+
+		if (activeExists) {
+			const op = context.backend.readFile(activeChunkPath);
+			const bytes = await op.finished;
+			filesMap = await this.decodeZip(bytes);
+		}
+
+		// Add/overwrite dirty files
+		await Promise.all(
+			dirtyPaths.map(async (path) => {
+				const content = await context.readLocalFile(path);
+				filesMap.set(path, content);
+
+				const fileMeta = localFiles[path];
+				const isNew = !activeChunk.files[path];
+				if (isNew) {
+					created.push(path);
+				} else {
+					updated.push(path);
+				}
+
+				activeChunk.files[path] = {
+					size: content.length,
+					modifiedAt: fileMeta.localModifiedAt
+				};
+
+				localFiles[path] = {
+					...fileMeta,
+					status: 'clean',
+					remoteModifiedAt: Date.now()
+				};
+			})
+		);
+
+		// Remove deleted files
+		deletedPaths.forEach((path) => {
+			filesMap.delete(path);
+			if (activeChunk.files[path]) {
+				delete activeChunk.files[path];
+			}
+			deleted.push(path);
+			delete localFiles[path];
+		});
+
+		// Update cumulative deleted list
+		const currentDeleted = new Set(activeChunk.deleted ?? []);
+		deletedPaths.forEach((path) => currentDeleted.add(path));
+		dirtyPaths.forEach((path) => currentDeleted.delete(path));
+		activeChunk.deleted = Array.from(currentDeleted);
+
+		// Recalculate uncompressedSize
+		activeChunk.uncompressedSize = Array.from(filesMap.entries())
+			.filter(([name]) => name !== '.metadata.json')
+			.reduce((acc, [, content]) => acc + content.length, 0);
+
+		await this.writeChunk(context, activeChunkPath, filesMap, activeChunk);
+	}
+
+	/**
+	 * Creates a new remote chunk for overflow local changes (rollover).
+	 */
+	private async rolloverToNewChunk(
+		context: StratusSyncContext,
+		metadata: any,
+		activeChunkNum: number,
+		activeChunk: ChunkMetadata,
+		dirtyPaths: string[],
+		deletedPaths: string[],
+		created: string[],
+		deleted: string[]
+	): Promise<void> {
+		const localFiles = metadata.files;
+		const nextChunkNum = activeChunkNum + 1;
+		const nextChunkPath = this.formatChunkPath(nextChunkNum);
+
+		const newFilesMap = new Map<string, Uint8Array>();
+		const nextChunk: ChunkMetadata = {
+			uncompressedSize: 0,
+			files: {},
+			deleted: []
+		};
+
+		const currentDeleted = new Set(activeChunk.deleted ?? []);
+		deletedPaths.forEach((path) => currentDeleted.add(path));
+		dirtyPaths.forEach((path) => currentDeleted.delete(path));
+		nextChunk.deleted = Array.from(currentDeleted);
+
+		// Add dirty files to new chunk
+		await Promise.all(
+			dirtyPaths.map(async (path) => {
+				const content = await context.readLocalFile(path);
+				newFilesMap.set(path, content);
+
+				const fileMeta = localFiles[path];
+				created.push(path);
+
+				nextChunk.files[path] = {
+					size: content.length,
+					modifiedAt: fileMeta.localModifiedAt
+				};
+
+				localFiles[path] = {
+					...fileMeta,
+					status: 'clean',
+					remoteModifiedAt: Date.now()
+				};
+			})
+		);
+
+		// Remove local deleted files
+		deletedPaths.forEach((path) => {
+			deleted.push(path);
+			delete localFiles[path];
+		});
+
+		// Recalculate size
+		nextChunk.uncompressedSize = Array.from(newFilesMap.entries())
+			.filter(([name]) => name !== '.metadata.json')
+			.reduce((acc, [, content]) => acc + content.length, 0);
+
+		await this.writeChunk(context, nextChunkPath, newFilesMap, nextChunk);
+		metadata.chunks[nextChunkPath] = nextChunk;
+	}
+
+	async sync(context: StratusSyncContext): Promise<SyncResult> {
+		const metadata = await context.getLocalMetadata();
+		const localFiles = metadata.files;
+
+		// Ensure chunks cache is initialised
+		if (!metadata.chunks) {
+			metadata.chunks = {};
+		}
+
+		const conflicts: SyncConflict[] = [];
+		const created: string[] = [];
+		const updated: string[] = [];
+		const deleted: string[] = [];
+
+		const remoteChunks = await this.listRemoteChunks(context.backend);
+
+		// ==========================================
+		// Phase 1: Pull & Extract (Remote updates)
+		// ==========================================
+		const chunksToDownload = remoteChunks.filter((rc) => {
+			const cached = metadata.chunks![rc.path];
+			return !cached || cached.uncompressedSize === 0;
+		});
+
+		await chunksToDownload.reduce(async (promise, rc) => {
+			await promise;
+			await this.downloadAndExtractChunk(context, rc, metadata, conflicts, created, updated);
+		}, Promise.resolve());
+
+		// ==========================================
+		// Phase 2: Apply Cumulative Deletions
+		// ==========================================
+		let activeChunkNum = 1;
+		let activeChunkPath = this.formatChunkPath(activeChunkNum);
+
+		if (remoteChunks.length > 0) {
+			const highest = remoteChunks[remoteChunks.length - 1];
+			activeChunkNum = highest.num;
+			activeChunkPath = highest.path;
+		}
+
+		const activeChunk = await this.initialiseActiveChunk(
+			context,
+			activeChunkPath,
+			remoteChunks,
+			metadata.chunks
+		);
+
+		// Apply deletions from active chunk cumulative deleted list
+		if (activeChunk.deleted) {
+			await Promise.all(
+				activeChunk.deleted.map(async (path) => {
+					const localFile = localFiles[path];
+					if (localFile && localFile.status === 'clean') {
+						await context.deleteLocalFile(path);
+						delete localFiles[path];
+						deleted.push(path);
+					}
+				})
+			);
+		}
+
+		// ==========================================
+		// Phase 3: Push & Append (Local changes)
+		// ==========================================
+		const dirtyPaths = Object.keys(localFiles).filter(
+			(path) => localFiles[path].status === 'dirty'
+		);
+		const deletedPaths = Object.keys(localFiles).filter(
+			(path) => localFiles[path].status === 'deleted'
+		);
+
+		if (dirtyPaths.length > 0 || deletedPaths.length > 0) {
+			const newChangesSize = await Promise.all(
+				dirtyPaths.map(async (path) => {
+					const content = await context.readLocalFile(path);
+					return content.length;
+				})
+			).then((sizes) => sizes.reduce((acc, s) => acc + s, 0));
+
+			const activeChunkSize = activeChunk.uncompressedSize;
+
+			if (activeChunkSize + newChangesSize <= this.chunkSizeLimit) {
+				await this.appendToActiveChunk(
+					context,
+					metadata,
+					activeChunkPath,
+					activeChunk,
+					remoteChunks,
+					dirtyPaths,
+					deletedPaths,
+					created,
+					updated,
+					deleted
+				);
+			} else {
+				await this.rolloverToNewChunk(
+					context,
+					metadata,
+					activeChunkNum,
+					activeChunk,
+					dirtyPaths,
+					deletedPaths,
+					created,
+					deleted
+				);
+			}
+		}
+
+		await context.saveLocalMetadata(metadata);
+
+		if (conflicts.length > 0) {
+			throw new SyncConflictError(conflicts);
+		}
+
+		return { created, updated, deleted };
+	}
+
+	async consolidate(context: StratusSyncContext): Promise<void> {
+		// 1. Sync first to make sure everything is completely synchronised
+		await this.sync(context);
+
+		// 2. Read the latest metadata
+		const metadata = await context.getLocalMetadata();
+		const localFiles = metadata.files;
+
+		// Ensure chunks cache is initialised
+		if (!metadata.chunks) {
+			metadata.chunks = {};
+		}
+
+		// Find active files (exclude 'deleted' status and '_updates' files)
+		const activePaths = Object.keys(localFiles).filter(
+			(path) => localFiles[path].status !== 'deleted' && !path.endsWith('_updates')
+		);
+
+		// 3. Pack active files into a new set of temp chunks
+		const tempChunks: { path: string; meta: ChunkMetadata }[] = [];
+
+		let currentTempChunkNum = 1;
+		let currentTempChunkPath = `/temp_archive_chunk_${String(currentTempChunkNum).padStart(3, '0')}.zip`;
+
+		let currentFilesMap = new Map<string, Uint8Array>();
+		let currentChunkMeta: ChunkMetadata = {
+			uncompressedSize: 0,
+			files: {},
+			deleted: []
+		};
+
+		// We will pack files sequentially to respect chunk boundaries
+		await activePaths.reduce(async (promise, path) => {
+			await promise;
+			const content = await context.readLocalFile(path);
+			const fileMeta = localFiles[path];
+
+			// If adding this file exceeds the threshold and we already have files in the current chunk, close it and start a new one
+			if (currentChunkMeta.uncompressedSize + content.length > this.chunkSizeLimit && currentFilesMap.size > 0) {
+				// Serialize metadata and write the current temp chunk
+				currentChunkMeta.uncompressedSize = Array.from(currentFilesMap.entries())
+					.filter(([name]) => name !== '.metadata.json')
+					.reduce((acc, [, bytes]) => acc + bytes.length, 0);
+
+				await this.writeChunk(context, currentTempChunkPath, currentFilesMap, currentChunkMeta);
+
+				tempChunks.push({
+					path: currentTempChunkPath,
+					meta: { ...currentChunkMeta }
+				});
+
+				// Start next temp chunk
+				currentTempChunkNum++;
+				currentTempChunkPath = `/temp_archive_chunk_${String(currentTempChunkNum).padStart(3, '0')}.zip`;
+				currentFilesMap = new Map<string, Uint8Array>();
+				currentChunkMeta = {
+					uncompressedSize: 0,
+					files: {},
+					deleted: []
+				};
+			}
+
+			// Add file to current chunk
+			currentFilesMap.set(path, content);
+			currentChunkMeta.files[path] = {
+				size: content.length,
+				modifiedAt: fileMeta.localModifiedAt
+			};
+			currentChunkMeta.uncompressedSize += content.length;
+		}, Promise.resolve());
+
+		// Add the final temp chunk
+		if (currentFilesMap.size > 0 || tempChunks.length === 0) {
+			currentChunkMeta.uncompressedSize = Array.from(currentFilesMap.entries())
+				.filter(([name]) => name !== '.metadata.json')
+				.reduce((acc, [, bytes]) => acc + bytes.length, 0);
+
+			await this.writeChunk(context, currentTempChunkPath, currentFilesMap, currentChunkMeta);
+
+			tempChunks.push({
+				path: currentTempChunkPath,
+				meta: { ...currentChunkMeta }
+			});
+		}
+
+		// 4. Delete all old remote chunks archive_chunk_*.zip
+		const oldRemoteChunks = await this.listRemoteChunks(context.backend);
+		await oldRemoteChunks.reduce(async (promise, chunk) => {
+			await promise;
+			await context.backend.deleteFile(chunk.path);
+		}, Promise.resolve());
+
+		// 5. Rename temp chunks to final names archive_chunk_*.zip
+		const newChunksCache: Record<string, ChunkMetadata> = {};
+		await tempChunks.reduce(async (promise, chunk, index) => {
+			await promise;
+			const finalChunkNum = index + 1;
+			const finalChunkPath = this.formatChunkPath(finalChunkNum);
+			await context.backend.renameFile(chunk.path, finalChunkPath);
+
+			// Populate cache for local metadata
+			newChunksCache[finalChunkPath] = {
+				...chunk.meta
+			};
+		}, Promise.resolve());
+
+		// Update local chunks cache and save
+		metadata.chunks = newChunksCache;
+		await context.saveLocalMetadata(metadata);
+	}
+}

@@ -1,82 +1,12 @@
 import { beforeEach, describe, test, expect } from 'vitest';
 import { StratusBase, SyncConflictError } from './StratusBase.ts';
-import { MiddlewareIndividualFile } from './MiddlewareIndividualFile.ts';
-import type { StorageBackend, StorageFileInfo, StorageOperation } from './types.ts';
-import { BaseStorageOperation } from './utils/BaseStorageOperation.ts';
+import { MiddlewareIndividualFile } from './middleware/MiddlewareIndividualFile/MiddlewareIndividualFile.ts';
+import { MemoryStorage } from './backends/MemoryStorage.ts';
 
 const TEST_ROOT = 'stratus-browser-test';
 
-class MockRemoteBackend implements StorageBackend {
-	id = 'mock-remote';
-	files = new Map<string, { content: Uint8Array; modifiedAt: Date; etag?: string }>();
-
-	async isConfigured() {
-		return true;
-	}
-
-	async stat(path: string): Promise<StorageFileInfo | null> {
-		const file = this.files.get(path);
-		if (!file) return null;
-		return {
-			path,
-			name: path.split('/').pop() || '',
-			type: 'file',
-			size: file.content.length,
-			modifiedAt: file.modifiedAt,
-			etag: file.etag
-		};
-	}
-
-	readFile(path: string): StorageOperation<Uint8Array> {
-		return new BaseStorageOperation(async () => {
-			const file = this.files.get(path);
-			if (!file) throw new Error(`Remote file not found: ${path}`);
-			return file.content;
-		});
-	}
-
-	writeFile(path: string, content: Uint8Array): StorageOperation<void> {
-		return new BaseStorageOperation(async () => {
-			this.files.set(path, {
-				content,
-				modifiedAt: new Date(),
-				etag: 'etag-' + Math.random().toString(36).substring(2)
-			});
-		});
-	}
-
-	async deleteFile(path: string): Promise<void> {
-		this.files.delete(path);
-	}
-
-	async listDirectory(path: string): Promise<StorageFileInfo[]> {
-		const results: StorageFileInfo[] = [];
-		for (const [filePath, file] of this.files.entries()) {
-			if (path === '/' || filePath.startsWith(path)) {
-				results.push({
-					path: filePath,
-					name: filePath.split('/').pop() || '',
-					type: 'file',
-					size: file.content.length,
-					modifiedAt: file.modifiedAt,
-					etag: file.etag
-				});
-			}
-		}
-		return results;
-	}
-
-	async renameFile(oldPath: string, newPath: string): Promise<void> {
-		const existing = this.files.get(oldPath);
-		if (existing) {
-			this.files.set(newPath, existing);
-			this.files.delete(oldPath);
-		}
-	}
-}
-
 describe('StratusBase Browser Tests with Native OPFS', () => {
-	let backend: MockRemoteBackend;
+	let backend: MemoryStorage;
 	let stratus: StratusBase;
 
 	beforeEach(async () => {
@@ -87,7 +17,7 @@ describe('StratusBase Browser Tests with Native OPFS', () => {
 			// Ignore if not present yet
 		}
 
-		backend = new MockRemoteBackend();
+		backend = new MemoryStorage();
 		stratus = new StratusBase({
 			backend,
 			localRoot: TEST_ROOT,
@@ -121,7 +51,7 @@ describe('StratusBase Browser Tests with Native OPFS', () => {
 	});
 
 	test('Real synchronization with native OPFS storage', async () => {
-		backend.files.set('/remote.md', {
+		backend.getFilesMap().set('/remote.md', {
 			content: new TextEncoder().encode('Remote Content'),
 			modifiedAt: new Date(),
 			etag: 'etag1'
@@ -139,13 +69,13 @@ describe('StratusBase Browser Tests with Native OPFS', () => {
 		const localData = await stratus.readFile('/remote.md').finished;
 		expect(new TextDecoder().decode(localData)).toBe('Remote Content');
 
-		const remoteFile = backend.files.get('/local.md');
+		const remoteFile = backend.getFilesMap().get('/local.md');
 		expect(remoteFile).toBeDefined();
 		expect(new TextDecoder().decode(remoteFile!.content)).toBe('Local Content');
 	});
 
 	test('Sync Conflict triggers custom error and generates conflict helper files', async () => {
-		backend.files.set('/conflict.md', {
+		backend.getFilesMap().set('/conflict.md', {
 			content: new TextEncoder().encode('Remote changes'),
 			modifiedAt: new Date(Date.now() + 5000),
 			etag: 'etag-remote'

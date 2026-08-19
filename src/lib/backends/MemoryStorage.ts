@@ -7,7 +7,8 @@ import { BaseStorageOperation } from '../utils/BaseStorageOperation.ts';
  */
 export class MemoryStorage implements StorageBackend {
 	readonly id = 'memory';
-	private files = new Map<string, { content: Uint8Array; modifiedAt: Date }>();
+	private files = new Map<string, { content: Uint8Array; modifiedAt: Date; etag?: string }>();
+	readonly atomicWritesTracked: string[] = [];
 
 	/**
 	 * Checks if the backend is configured. Memory storage is always ready.
@@ -47,7 +48,8 @@ export class MemoryStorage implements StorageBackend {
 				name,
 				type: 'file',
 				size: file.content.length,
-				modifiedAt: file.modifiedAt
+				modifiedAt: file.modifiedAt,
+				etag: file.etag
 			};
 		}
 
@@ -110,16 +112,21 @@ export class MemoryStorage implements StorageBackend {
 	 * @param _options Ignored for memory storage as writes are always atomic.
 	 * @returns The storage operation.
 	 */
-	writeFile(path: string, content: Uint8Array, _options?: WriteOptions): StorageOperation<void> {
+	writeFile(path: string, content: Uint8Array, options?: WriteOptions): StorageOperation<void> {
 		const clean = this.cleanPath(path);
 		return new BaseStorageOperation(async (signal) => {
 			if (signal.aborted) {
 				throw new DOMException('Operation aborted', 'AbortError');
 			}
+			const etag = 'etag-' + Math.random().toString(36).substring(2);
 			this.files.set(clean, {
 				content: new Uint8Array(content),
-				modifiedAt: new Date()
+				modifiedAt: new Date(),
+				etag
 			});
+			if (options?.atomic) {
+				this.atomicWritesTracked.push(clean);
+			}
 		});
 	}
 
@@ -234,5 +241,12 @@ export class MemoryStorage implements StorageBackend {
 				this.files.delete(oldKey);
 			}
 		});
+	}
+
+	/**
+	 * Exposes the internal files map for testing/introspection.
+	 */
+	getFilesMap(): Map<string, { content: Uint8Array; modifiedAt: Date; etag?: string }> {
+		return this.files;
 	}
 }

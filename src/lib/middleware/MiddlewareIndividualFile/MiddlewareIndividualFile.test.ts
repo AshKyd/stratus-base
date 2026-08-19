@@ -1,9 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert';
-import { StratusBase, setStorageManager, SyncConflictError } from './StratusBase.ts';
+import { StratusBase, setStorageManager, SyncConflictError } from '../../StratusBase.ts';
 import { MiddlewareIndividualFile } from './MiddlewareIndividualFile.ts';
-import type { StorageBackend, StorageFileInfo, StorageOperation } from './types.ts';
-import { BaseStorageOperation } from './utils/BaseStorageOperation.ts';
+import { MemoryStorage } from '../../backends/MemoryStorage.ts';
 
 // --- OPFS Mocks ---
 
@@ -16,7 +15,7 @@ class MockWritableFileStream {
 		if (typeof data === 'string') {
 			this.file.content = new TextEncoder().encode(data);
 		} else if (data instanceof Uint8Array) {
-			this.file.content = data;
+			this.file.content = data as any;
 		} else {
 			this.file.content = new Uint8Array(data);
 		}
@@ -96,89 +95,13 @@ class MockStorageManager {
 	}
 }
 
-// --- Mock Storage Backend ---
-
-class MockRemoteBackend implements StorageBackend {
-	id = 'mock-remote';
-	files = new Map<string, { content: Uint8Array; modifiedAt: Date; etag?: string }>();
-	atomicWritesTracked: string[] = [];
-
-	async isConfigured() {
-		return true;
-	}
-
-	async stat(path: string): Promise<StorageFileInfo | null> {
-		const file = this.files.get(path);
-		if (!file) return null;
-		return {
-			path,
-			name: path.split('/').pop() || '',
-			type: 'file',
-			size: file.content.length,
-			modifiedAt: file.modifiedAt,
-			etag: file.etag
-		};
-	}
-
-	readFile(path: string): StorageOperation<Uint8Array> {
-		return new BaseStorageOperation(async () => {
-			const file = this.files.get(path);
-			if (!file) throw new Error(`Remote file not found: ${path}`);
-			return file.content;
-		});
-	}
-
-	writeFile(path: string, content: Uint8Array, options?: { atomic?: boolean }): StorageOperation<void> {
-		return new BaseStorageOperation(async () => {
-			if (options?.atomic) {
-				this.atomicWritesTracked.push(path);
-			}
-			this.files.set(path, {
-				content,
-				modifiedAt: new Date(),
-				etag: 'etag-' + Math.random().toString(36).substring(2)
-			});
-		});
-	}
-
-	async deleteFile(path: string): Promise<void> {
-		this.files.delete(path);
-	}
-
-	async listDirectory(path: string): Promise<StorageFileInfo[]> {
-		const results: StorageFileInfo[] = [];
-		for (const [filePath, file] of this.files.entries()) {
-			if (path === '/' || filePath.startsWith(path)) {
-				// Simple flat list mapping for recursive walk test support
-				results.push({
-					path: filePath,
-					name: filePath.split('/').pop() || '',
-					type: 'file',
-					size: file.content.length,
-					modifiedAt: file.modifiedAt,
-					etag: file.etag
-				});
-			}
-		}
-		return results;
-	}
-
-	async renameFile(oldPath: string, newPath: string): Promise<void> {
-		const existing = this.files.get(oldPath);
-		if (existing) {
-			this.files.set(newPath, existing);
-			this.files.delete(oldPath);
-		}
-	}
-}
-
 test('MiddlewareIndividualFile sync runs', async (t) => {
 	await t.test('Remote only (new remote files)', async () => {
 		const storageMock = new MockStorageManager();
 		setStorageManager(storageMock);
 
-		const backend = new MockRemoteBackend();
-		backend.files.set('/note1.md', {
+		const backend = new MemoryStorage();
+		backend.getFilesMap().set('/note1.md', {
 			content: new TextEncoder().encode('Hello remote 1'),
 			modifiedAt: new Date(),
 			etag: 'etag1'
@@ -211,7 +134,7 @@ test('MiddlewareIndividualFile sync runs', async (t) => {
 		const storageMock = new MockStorageManager();
 		setStorageManager(storageMock);
 
-		const backend = new MockRemoteBackend();
+		const backend = new MemoryStorage();
 		const middleware = new MiddlewareIndividualFile();
 		const stratus = new StratusBase({
 			backend,
@@ -227,7 +150,7 @@ test('MiddlewareIndividualFile sync runs', async (t) => {
 		assert.deepStrictEqual(result.created, ['/local.md']);
 
 		// Verify uploaded to remote
-		const remoteFile = backend.files.get('/local.md');
+		const remoteFile = backend.getFilesMap().get('/local.md');
 		assert.ok(remoteFile);
 		assert.strictEqual(new TextDecoder().decode(remoteFile.content), 'Hello local');
 
@@ -240,8 +163,8 @@ test('MiddlewareIndividualFile sync runs', async (t) => {
 		const storageMock = new MockStorageManager();
 		setStorageManager(storageMock);
 
-		const backend = new MockRemoteBackend();
-		backend.files.set('/conflict.md', {
+		const backend = new MemoryStorage();
+		backend.getFilesMap().set('/conflict.md', {
 			content: new TextEncoder().encode('Remote content'),
 			modifiedAt: new Date(Date.now() + 5000), // Future / newer
 			etag: 'etag-remote'
@@ -288,8 +211,8 @@ test('MiddlewareIndividualFile sync runs', async (t) => {
 		const storageMock = new MockStorageManager();
 		setStorageManager(storageMock);
 
-		const backend = new MockRemoteBackend();
-		backend.files.set('/sparse.md', {
+		const backend = new MemoryStorage();
+		backend.getFilesMap().set('/sparse.md', {
 			content: new TextEncoder().encode('Lazy Loaded'),
 			modifiedAt: new Date(),
 			etag: 'etag-sparse'
@@ -320,7 +243,7 @@ test('MiddlewareIndividualFile sync runs', async (t) => {
 		const storageMock = new MockStorageManager();
 		setStorageManager(storageMock);
 
-		const backend = new MockRemoteBackend();
+		const backend = new MemoryStorage();
 		const middleware = new MiddlewareIndividualFile({ atomic: true });
 		const stratus = new StratusBase({
 			backend,
