@@ -5,7 +5,7 @@ import { playwright } from '@vitest/browser-playwright';
 export default defineConfig({
 	plugins: [sveltekit()],
 	test: {
-		include: ['src/**/*.browser.test.ts'],
+		include: ['src/**/*.browser.spec.ts'],
 		browser: {
 			enabled: true,
 			provider: playwright(),

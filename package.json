@@ -62,6 +62,7 @@
 	"dependencies": {
 		"@aws-sdk/client-s3": "^3.1111.0",
 		"@vitest/browser": "^4.1.10",
+		"@zip.js/zip.js": "^2.8.51",
 		"dropbox": "^10.45.0",
 		"playwright": "^1.62.1",
 		"s3rver": "^3.7.1",

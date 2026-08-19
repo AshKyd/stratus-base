@@ -18,3 +18,6 @@ export type {
 export { MiddlewareIndividualFile } from './MiddlewareIndividualFile.ts';
 export type { MiddlewareIndividualFileOptions } from './MiddlewareIndividualFile.ts';
 
+export { MemoryStorage } from './backends/MemoryStorage.ts';
+
+

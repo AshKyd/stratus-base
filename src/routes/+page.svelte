@@ -16,6 +16,15 @@
 		<p class="section-desc">Select a storage backend provider below to manually configure and test its CRUD operations in the browser:</p>
 		
 		<div class="card-grid">
+			<a href="/test/memory" class="backend-card">
+				<div class="card-header">
+					<span class="icon">💾</span>
+					<h3>Memory Storage</h3>
+				</div>
+				<p class="card-desc">Test in-memory storage file CRUD operations. Runs entirely client-side without any API keys or configuration needed.</p>
+				<span class="action-link">Open Tester →</span>
+			</a>
+
 			<a href="/test/dropbox" class="backend-card">
 				<div class="card-header">
 					<span class="icon">📦</span>
