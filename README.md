@@ -26,10 +26,7 @@ The library consists of three main components:
 Initialize the storage backend, middleware, and the `StratusBase` instance:
 
 ```typescript
-import { StratusBase } from './src/lib/StratusBase.js';
-import { MiddlewareZipChunk } from './src/lib/middleware/MiddlewareZipChunk/MiddlewareZipChunk.js';
-import { S3Storage } from './src/lib/backends/S3Storage.js';
-import { generateSecurePassword } from './src/lib/utils/crypto.js';
+import { StratusBase, MiddlewareZipChunk, S3Storage, generateSecurePassword } from 'stratus-base';
 
 const backend = new S3Storage({
 	bucket: 'my-bucket',

@@ -53,7 +53,7 @@ Since `GoogleDriveStorage` runs exclusively in the client browser, it uses the s
 
 ### Step A: Initialize the Backend
 ```typescript
-import { GoogleDriveStorage } from '$lib/backends/GoogleDriveStorage';
+import { GoogleDriveStorage } from 'stratus-base';
 
 const backend = new GoogleDriveStorage({
   clientId: 'YOUR_GOOGLE_CLIENT_ID' // Found in Google Cloud Credentials

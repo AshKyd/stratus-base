@@ -37,7 +37,7 @@ Since `DropboxStorage` runs exclusively in the client browser, it uses the secur
 
 ### Step A: Initialize the Backend
 ```typescript
-import { DropboxStorage } from '$lib/backends/DropboxStorage';
+import { DropboxStorage } from 'stratus-base';
 
 const backend = new DropboxStorage({
   clientId: 'YOUR_DROPBOX_APP_KEY' // Found in the Dropbox App Console settings

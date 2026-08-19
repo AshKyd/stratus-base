@@ -29,7 +29,7 @@ Since the GitHub storage backend runs exclusively in the browser and does not re
 Initialize the `GithubStorage` instance with the repository options and pass your token credentials.
 
 ```typescript
-import { GithubStorage } from '$lib/backends/GithubStorage';
+import { GithubStorage } from 'stratus-base';
 
 // 1. Initialize backend configuration
 const backend = new GithubStorage({
