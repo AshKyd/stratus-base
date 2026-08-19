@@ -23,4 +23,6 @@ export type { MiddlewareZipChunkOptions } from './middleware/MiddlewareZipChunk/
 
 export { MemoryStorage } from './backends/MemoryStorage.ts';
 
+export { generateSecurePassword } from './utils/crypto.ts';
+
 

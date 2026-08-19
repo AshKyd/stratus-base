@@ -19,6 +19,7 @@ import {
 export interface MiddlewareZipChunkOptions {
 	chunkSizeLimit?: number; // Target chunk size limit, default 5MB
 	atomic?: boolean;        // Perform atomic writes on backend if supported
+	password?: string;       // Password for AES-256 encryption (required)
 }
 
 /**
@@ -28,8 +29,13 @@ export interface MiddlewareZipChunkOptions {
 export class MiddlewareZipChunk implements StratusMiddleware {
 	private chunkSizeLimit: number;
 	private atomic: boolean;
+	private password?: string;
 
 	constructor(options: MiddlewareZipChunkOptions = {}) {
+		if (!options.password) {
+			throw new Error('MiddlewareZipChunk requires a password option for encryption.');
+		}
+		this.password = options.password;
 		this.chunkSizeLimit = options.chunkSizeLimit ?? 5 * 1024 * 1024;
 		this.atomic = options.atomic ?? false;
 	}
@@ -84,7 +90,7 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 		if (zipBytes.length === 0) {
 			return filesMap;
 		}
-		const reader = new ZipReader(new Uint8ArrayReader(zipBytes));
+		const reader = new ZipReader(new Uint8ArrayReader(zipBytes), { password: this.password });
 		const entries = await reader.getEntries();
 		await entries.reduce(async (promise, entry) => {
 			await promise;
@@ -108,7 +114,10 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 		await Array.from(filesMap.entries()).reduce(async (promise, [filename, content]) => {
 			await promise;
 			const entryName = filename.startsWith('/') ? filename.slice(1) : filename;
-			await zipWriter.add(entryName, new Uint8ArrayReader(content));
+			await zipWriter.add(entryName, new Uint8ArrayReader(content), {
+				password: this.password,
+				encryptionStrength: 3
+			});
 		}, Promise.resolve());
 		await zipWriter.close();
 		return await writer.getData();
