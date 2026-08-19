@@ -93,6 +93,10 @@ export class StratusBase extends EventTarget {
 	private middleware: StratusMiddleware;
 	private sparse: boolean;
 
+	/**
+	 * Initialises a new StratusBase sync client instance.
+	 * @param options Configuration options including backend, local folder root, and middleware strategy.
+	 */
 	constructor(options: StratusBaseOptions) {
 		super();
 		this.backend = options.backend;
@@ -103,6 +107,10 @@ export class StratusBase extends EventTarget {
 
 	// --- OPFS Helper Methods ---
 
+	/**
+	 * Accesses the root directory handle for the browser Origin Private File System.
+	 * Throws if the runtime environment does not support or initialise the storage manager.
+	 */
 	private async getRootHandle(): Promise<FileSystemDirectoryHandle> {
 		if (!storageManager) {
 			throw new Error('Storage manager not available. Use setStorageManager in non-browser environments.');
@@ -110,16 +118,31 @@ export class StratusBase extends EventTarget {
 		return await storageManager.getDirectory();
 	}
 
+	/**
+	 * Retrieves the handle for the local client root folder within OPFS.
+	 * @param create If true, creates the folder path if it does not exist.
+	 */
 	private async getLocalRootHandle(create = true): Promise<FileSystemDirectoryHandle> {
 		const root = await this.getRootHandle();
 		return await this.traverseDirectory(root, this.localRoot, { create });
 	}
 
+	/**
+	 * Accesses the subfolder dedicated to cached user files ('/content').
+	 * This prevents library metadata from conflicting with the user files.
+	 * @param create If true, creates the content directory if it is missing.
+	 */
 	private async getContentRootHandle(create = true): Promise<FileSystemDirectoryHandle> {
 		const localRoot = await this.getLocalRootHandle(create);
 		return await localRoot.getDirectoryHandle('content', { create });
 	}
 
+	/**
+	 * Recursively traverses a folder path segments to return the target directory handle.
+	 * @param root Directory handle to start traversing from.
+	 * @param path Slash-separated directory path.
+	 * @param options Folder creation options.
+	 */
 	private async traverseDirectory(
 		root: FileSystemDirectoryHandle,
 		path: string,
@@ -133,6 +156,11 @@ export class StratusBase extends EventTarget {
 		return current;
 	}
 
+	/**
+	 * Obtains a FileSystemFileHandle for a specific file path, traversing directories as needed.
+	 * @param path File path relative to the content directory.
+	 * @param options File creation options.
+	 */
 	private async getFileHandle(
 		path: string,
 		options: { create?: boolean } = {}
@@ -149,6 +177,11 @@ export class StratusBase extends EventTarget {
 
 	// --- Metadata Management ---
 
+	/**
+	 * Reads the local client synchronisation metadata (`metadata.json`).
+	 * Returns an empty database representation if the file is empty, missing, or corrupted.
+	 * @internal
+	 */
 	public async getMetadata(): Promise<StratusMetadata> {
 		try {
 			const localRoot = await this.getLocalRootHandle(true);
@@ -164,6 +197,11 @@ export class StratusBase extends EventTarget {
 		}
 	}
 
+	/**
+	 * Overwrites the local metadata state on the client file system.
+	 * @param metadata New client state representation.
+	 * @internal
+	 */
 	public async saveMetadata(metadata: StratusMetadata): Promise<void> {
 		const localRoot = await this.getLocalRootHandle(true);
 		const fileHandle = await localRoot.getFileHandle('metadata.json', { create: true });
@@ -174,7 +212,12 @@ export class StratusBase extends EventTarget {
 
 	// --- Public File System API ---
 
-	async stat(path: string): Promise<StorageFileInfo | null> {
+	/**
+	 * Checks status and gets metadata for a local file.
+	 * Returns null if the file does not exist locally or is flagged as deleted.
+	 * @param path Relative path to the target file.
+	 */
+	public async stat(path: string): Promise<StorageFileInfo | null> {
 		const metadata = await this.getMetadata();
 		const fileMeta = metadata.files[path];
 
@@ -192,7 +235,12 @@ export class StratusBase extends EventTarget {
 		};
 	}
 
-	readFile(path: string): StorageOperation<Uint8Array> {
+	/**
+	 * Reads file contents from the local cache.
+	 * In sparse mode, if the file is not yet cached locally, it downloads it on-demand from remote storage.
+	 * @param path Relative path to the file.
+	 */
+	public readFile(path: string): StorageOperation<Uint8Array> {
 		return new BaseStorageOperation<Uint8Array>(async () => {
 			const metadata = await this.getMetadata();
 			const fileMeta = metadata.files[path];
@@ -223,7 +271,13 @@ export class StratusBase extends EventTarget {
 		});
 	}
 
-	writeFile(path: string, content: Uint8Array, options?: WriteOptions): StorageOperation<void> {
+	/**
+	 * Writes content to a local file and marks its synchronization status as dirty.
+	 * @param path Relative path of the file.
+	 * @param content Binary content to write.
+	 * @param options Write-then-rename configurations for atomic writes.
+	 */
+	public writeFile(path: string, content: Uint8Array, options?: WriteOptions): StorageOperation<void> {
 		return new BaseStorageOperation<void>(async () => {
 			const fileHandle = await this.getFileHandle(path, { create: true });
 			const writable = await fileHandle.createWritable();
@@ -246,7 +300,12 @@ export class StratusBase extends EventTarget {
 		});
 	}
 
-	async deleteFile(path: string): Promise<void> {
+	/**
+	 * Deletes a file locally and flags it as deleted in the client metadata.
+	 * The deletion is propagated to remote storage on the next sync.
+	 * @param path Relative path of the file.
+	 */
+	public async deleteFile(path: string): Promise<void> {
 		const metadata = await this.getMetadata();
 		const existing = metadata.files[path];
 		if (!existing) return;
@@ -268,7 +327,12 @@ export class StratusBase extends EventTarget {
 		await this.saveMetadata(metadata);
 	}
 
-	async listDirectory(path: string): Promise<StorageFileInfo[]> {
+	/**
+	 * Lists files directly inside the specified directory (non-recursive).
+	 * Filters out deleted metadata tracks.
+	 * @param path Directory path.
+	 */
+	public async listDirectory(path: string): Promise<StorageFileInfo[]> {
 		const metadata = await this.getMetadata();
 		const prefix = path.endsWith('/') ? path : path + '/';
 		const targetDir = path === '/' ? '/' : path;
@@ -296,7 +360,12 @@ export class StratusBase extends EventTarget {
 			}));
 	}
 
-	async renameFile(oldPath: string, newPath: string): Promise<void> {
+	/**
+	 * Renames and moves a file locally. Marks the old path as deleted and the new path as dirty.
+	 * @param oldPath Old path relative to content directory.
+	 * @param newPath New path relative to content directory.
+	 */
+	public async renameFile(oldPath: string, newPath: string): Promise<void> {
 		const metadata = await this.getMetadata();
 		const existing = metadata.files[oldPath];
 		if (!existing || existing.status === 'deleted') {
@@ -346,7 +415,12 @@ export class StratusBase extends EventTarget {
 
 	// --- Sync Operation ---
 
-	async sync(): Promise<SyncResult> {
+	/**
+	 * Synchronises client local files and metadata with the remote storage backend.
+	 * Dispatches `syncstart`, `sync`, `conflict`, and `error` events.
+	 * Throws `SyncConflictError` if conflict conditions arise.
+	 */
+	public async sync(): Promise<SyncResult> {
 		const context: StratusSyncContext = {
 			backend: this.backend,
 			localRoot: this.localRoot,
@@ -406,7 +480,11 @@ export class StratusBase extends EventTarget {
 		}
 	}
 
-	async consolidate(): Promise<void> {
+	/**
+	 * Defragments the database storage layout on support middleware.
+	 * Packs clean active files sequentially and prunes remote history chunks.
+	 */
+	public async consolidate(): Promise<void> {
 		const context: StratusSyncContext = {
 			backend: this.backend,
 			localRoot: this.localRoot,
@@ -454,6 +532,9 @@ export class StratusBase extends EventTarget {
 		}
 	}
 
+	/**
+	 * Appends `_updates` suffix before the extension of a file path during conflicts.
+	 */
 	private appendUpdatesSuffix(filePath: string): string {
 		const lastDot = filePath.lastIndexOf('.');
 		const lastSlash = filePath.lastIndexOf('/');
@@ -463,6 +544,9 @@ export class StratusBase extends EventTarget {
 		return filePath + '_updates';
 	}
 
+	/**
+	 * Prunes the local OPFS copy of a conflict file and removes it from metadata structures.
+	 */
 	private async deleteLocalFileRecord(metadata: StratusMetadata, path: string): Promise<void> {
 		try {
 			const contentRoot = await this.getContentRootHandle(false);
@@ -482,8 +566,10 @@ export class StratusBase extends EventTarget {
 	 * Resolves a conflict on a given file by writing the final resolved content,
 	 * marking the file as dirty (so it pushes to remote on next sync),
 	 * and deleting the temporary updates file.
+	 * @param path The relative path to the file in conflict.
+	 * @param content The final content representing the merged/resolved file.
 	 */
-	async resolveConflict(path: string, content: Uint8Array): Promise<void> {
+	public async resolveConflict(path: string, content: Uint8Array): Promise<void> {
 		const metadata = await this.getMetadata();
 		const fileMeta = metadata.files[path];
 		if (!fileMeta || fileMeta.status !== 'conflict') {
