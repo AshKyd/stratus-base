@@ -1,9 +1,4 @@
-import type {
-	StorageBackend,
-	StorageFileInfo,
-	StorageOperation,
-	WriteOptions
-} from './types.ts';
+import type { StorageBackend, StorageFileInfo, StorageOperation, WriteOptions } from './types.ts';
 import { BaseStorageOperation } from './utils/BaseStorageOperation.ts';
 
 export interface FileMetadata {
@@ -71,9 +66,13 @@ export interface StratusMiddleware {
 }
 
 export interface StratusBaseOptions {
+	/** Remote storage provider implementation. */
 	backend: StorageBackend;
-	localRoot: string;
+	/** Path of the local directory inside the browser Origin Private File System (OPFS). Defaults to '/stratus'. */
+	localRoot?: string;
+	/** Synchronization strategy middleware. */
 	middleware: StratusMiddleware;
+	/** Delay downloading remote file contents until explicitly read. Defaults to false. */
 	sparse?: boolean;
 }
 
@@ -100,7 +99,7 @@ export class StratusBase extends EventTarget {
 	constructor(options: StratusBaseOptions) {
 		super();
 		this.backend = options.backend;
-		this.localRoot = options.localRoot;
+		this.localRoot = options.localRoot ?? '/stratus';
 		this.middleware = options.middleware;
 		this.sparse = options.sparse ?? false;
 	}
@@ -113,7 +112,9 @@ export class StratusBase extends EventTarget {
 	 */
 	private async getRootHandle(): Promise<FileSystemDirectoryHandle> {
 		if (!storageManager) {
-			throw new Error('Storage manager not available. Use setStorageManager in non-browser environments.');
+			throw new Error(
+				'Storage manager not available. Use setStorageManager in non-browser environments.'
+			);
 		}
 		return await storageManager.getDirectory();
 	}
@@ -277,7 +278,11 @@ export class StratusBase extends EventTarget {
 	 * @param content Binary content to write.
 	 * @param options Write-then-rename configurations for atomic writes.
 	 */
-	public writeFile(path: string, content: Uint8Array, options?: WriteOptions): StorageOperation<void> {
+	public writeFile(
+		path: string,
+		content: Uint8Array,
+		options?: WriteOptions
+	): StorageOperation<void> {
 		return new BaseStorageOperation<void>(async () => {
 			const fileHandle = await this.getFileHandle(path, { create: true });
 			const writable = await fileHandle.createWritable();
@@ -315,7 +320,9 @@ export class StratusBase extends EventTarget {
 			const segments = path.split('/').filter(Boolean);
 			const fileName = segments.pop();
 			if (fileName) {
-				const dir = await this.traverseDirectory(contentRoot, segments.join('/'), { create: false });
+				const dir = await this.traverseDirectory(contentRoot, segments.join('/'), {
+					create: false
+				});
 				await dir.removeEntry(fileName);
 			}
 		} catch {
@@ -390,7 +397,9 @@ export class StratusBase extends EventTarget {
 			const segments = oldPath.split('/').filter(Boolean);
 			const fileName = segments.pop();
 			if (fileName) {
-				const dir = await this.traverseDirectory(contentRoot, segments.join('/'), { create: false });
+				const dir = await this.traverseDirectory(contentRoot, segments.join('/'), {
+					create: false
+				});
 				await dir.removeEntry(fileName);
 			}
 		} catch {
@@ -444,7 +453,9 @@ export class StratusBase extends EventTarget {
 					const segments = path.split('/').filter(Boolean);
 					const fileName = segments.pop();
 					if (fileName) {
-						const dir = await this.traverseDirectory(contentRoot, segments.join('/'), { create: false });
+						const dir = await this.traverseDirectory(contentRoot, segments.join('/'), {
+							create: false
+						});
 						await dir.removeEntry(fileName);
 					}
 				} catch {
@@ -508,7 +519,9 @@ export class StratusBase extends EventTarget {
 					const segments = path.split('/').filter(Boolean);
 					const fileName = segments.pop();
 					if (fileName) {
-						const dir = await this.traverseDirectory(contentRoot, segments.join('/'), { create: false });
+						const dir = await this.traverseDirectory(contentRoot, segments.join('/'), {
+							create: false
+						});
 						await dir.removeEntry(fileName);
 					}
 				} catch {
@@ -553,7 +566,9 @@ export class StratusBase extends EventTarget {
 			const segments = path.split('/').filter(Boolean);
 			const fileName = segments.pop();
 			if (fileName) {
-				const dir = await this.traverseDirectory(contentRoot, segments.join('/'), { create: false });
+				const dir = await this.traverseDirectory(contentRoot, segments.join('/'), {
+					create: false
+				});
 				await dir.removeEntry(fileName);
 			}
 		} catch {

@@ -1,65 +1,91 @@
-# Svelte library
+# StratusBase
 
-Everything you need to build a Svelte library, powered by [`sv`](https://npmjs.com/package/sv).
+`StratusBase` is a client-side file synchronisation library that maps a local directory in the browser Origin Private File System (OPFS) to a remote storage provider.
 
-Read more about creating a library [in the docs](https://svelte.dev/docs/kit/packaging).
+## Architecture
 
-## Creating a project
+The library consists of three main components:
 
-If you're seeing this, you've probably already done this step. Congrats!
+1. **Client (`StratusBase`)**: Provides the CRUD filesystem interface (`readFile`, `writeFile`, `deleteFile`, `listDirectory`) and exposes the `sync()` method to process remote updates.
+2. **Backends (`StorageBackend`)**: Abstract class implementations for remote providers:
+   - [Google Drive](docs/google-drive.md)
+   - [Dropbox](docs/dropbox.md)
+   - [GitHub](docs/github.md)
+   - [Amazon S3](docs/s3.md)
+   - [MemoryStorage](src/lib/backends/MemoryStorage.ts) (In-memory implementation for testing)
+3. **Middleware (`StratusMiddleware`)**: Defines the synchronisation strategy:
+   - `MiddlewareIndividualFile`: Synchronises files individually. Supports `sparse` mode (on-demand download of file contents).
+   - `MiddlewareZipChunk`: Compresses files into password-protected sequential ZIP archives, hiding file names and folder structures from the remote host. Practical, portable e2e encryption.
 
-```sh
-# create a new project in the current directory
-npx sv create
+---
 
-# create a new project in my-app
-npx sv create my-app
+## Quick Start
+
+### 1. Initialization
+
+Initialize the storage backend, middleware, and the `StratusBase` instance:
+
+```typescript
+import { StratusBase } from './src/lib/StratusBase.js';
+import { MiddlewareZipChunk } from './src/lib/middleware/MiddlewareZipChunk/MiddlewareZipChunk.js';
+import { S3Storage } from './src/lib/backends/S3Storage.js';
+import { generateSecurePassword } from './src/lib/utils/crypto.js';
+
+const backend = new S3Storage({
+	bucket: 'my-bucket',
+	region: 'us-east-1',
+	accessKeyId: 'ACCESS_KEY_ID',
+	secretAccessKey: 'SECRET_ACCESS_KEY'
+});
+
+const password = generateSecurePassword(64);
+
+const middleware = new MiddlewareZipChunk({
+	chunkSizeLimit: 5 * 1024 * 1024,
+	password: password,
+	atomic: true
+});
+
+const client = new StratusBase({
+	backend,
+	middleware,
+	sparse: false
+});
 ```
 
-To recreate this project with the same configuration:
+### 2. File Operations
 
-```sh
-# recreate this project
-npx sv@0.17.0 create --template library --types ts --add prettier eslint ai-tools="ide:gemini+tools:mcp,svelte-code-writer,svelte-core-bestpractices,svelte-file-editor+mcpSetup:remote" --install npm stratus-base
+Operations return a `StorageOperation` object containing a `.finished` promise for completion, support for `.cancel()`, and progress event hooks:
+
+```typescript
+// Write file
+const writeOp = client.writeFile('/todo.md', new TextEncoder().encode('- [ ] Task'));
+await writeOp.finished;
+
+// Read file
+const readOp = client.readFile('/todo.md');
+const content = await readOp.finished;
 ```
 
-## Developing
+### 3. Synchronization
 
-Once you've created a project and installed dependencies with `npm install` (or `pnpm install` or `yarn`), start a development server:
+Run `sync()` to push local edits and pull remote changes:
 
-```sh
-npm run dev
-
-# or start the server and open the app in a new browser tab
-npm run dev -- --open
+```typescript
+const result = await client.sync();
+console.log(result.created, result.updated, result.deleted);
 ```
 
-Everything inside `src/lib` is part of your library, everything inside `src/routes` can be used as a showcase or preview app.
+---
 
-## Building
+## Documentation
 
-To build your library:
+For detailed configurations, see the following documentation:
 
-```sh
-npm pack
-```
-
-To create a production version of your showcase app:
-
-```sh
-npm run build
-```
-
-You can preview the production build with `npm run preview`.
-
-> To deploy your app, you may need to install an [adapter](https://svelte.dev/docs/kit/adapters) for your target environment.
-
-## Publishing
-
-Go into the `package.json` and give your package the desired name through the `"name"` option. Also consider adding a `"license"` field and point it to a `LICENSE` file which you can create from a template (one popular option is the [MIT license](https://opensource.org/license/mit/)).
-
-To publish your library to [npm](https://www.npmjs.com):
-
-```sh
-npm publish
-```
+- [Getting Started Guide](docs/getting-started.md)
+- [Google Drive Integration](docs/google-drive.md)
+- [Dropbox Integration](docs/dropbox.md)
+- [GitHub Integration](docs/github.md)
+- [Amazon S3 Integration](docs/s3.md)
+- [Core Design Plan](plans/index.md)
+- [API Reference](plans/API.md)
