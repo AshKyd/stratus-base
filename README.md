@@ -55,16 +55,16 @@ const client = new StratusBase({
 
 ### 2. File Operations
 
-Operations return a `StorageOperation` object containing a `.finished` promise for completion, support for `.cancel()`, and progress event hooks:
+Local client operations are simple Promise-based async methods. You can work with raw binary data or use built-in text helpers:
 
 ```typescript
-// Write file
-const writeOp = client.writeFile('/todo.md', new TextEncoder().encode('- [ ] Task'));
-await writeOp.finished;
+// Working with Text (Helpers)
+await client.writeTextFile('/todo.md', '- [ ] Task');
+const todoText = await client.readTextFile('/todo.md');
 
-// Read file
-const readOp = client.readFile('/todo.md');
-const content = await readOp.finished;
+// Working with Binary Data
+await client.writeFile('/image.png', pngBytes);
+const imageBytes = await client.readFile('/image.png');
 ```
 
 ### 3. Synchronization

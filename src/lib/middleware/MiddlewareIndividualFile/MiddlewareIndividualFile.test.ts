@@ -126,7 +126,7 @@ test('MiddlewareIndividualFile sync runs', async (t) => {
 		assert.ok(fileInfo);
 		assert.strictEqual(fileInfo.size, 14);
 
-		const content = await stratus.readFile('/note1.md').finished;
+		const content = await stratus.readFile('/note1.md');
 		assert.strictEqual(new TextDecoder().decode(content), 'Hello remote 1');
 	});
 
@@ -143,7 +143,7 @@ test('MiddlewareIndividualFile sync runs', async (t) => {
 		});
 
 		// Create local file
-		await stratus.writeFile('/local.md', new TextEncoder().encode('Hello local')).finished;
+		await stratus.writeFile('/local.md', new TextEncoder().encode('Hello local'));
 
 		// Sync
 		const result = await stratus.sync();
@@ -178,7 +178,7 @@ test('MiddlewareIndividualFile sync runs', async (t) => {
 		});
 
 		// Write locally (sets status to dirty)
-		await stratus.writeFile('/conflict.md', new TextEncoder().encode('Local content')).finished;
+		await stratus.writeFile('/conflict.md', new TextEncoder().encode('Local content'));
 
 		// Manually backdate local remoteModifiedAt to trigger newer check
 		const meta = await stratus.getMetadata();
@@ -199,11 +199,11 @@ test('MiddlewareIndividualFile sync runs', async (t) => {
 		const updatesInfo = await stratus.stat('/conflict_updates.md');
 		assert.ok(updatesInfo);
 
-		const updatesContent = await stratus.readFile('/conflict_updates.md').finished;
+		const updatesContent = await stratus.readFile('/conflict_updates.md');
 		assert.strictEqual(new TextDecoder().decode(updatesContent), 'Remote content');
 
 		// Original local file should still contain local changes
-		const localContent = await stratus.readFile('/conflict.md').finished;
+		const localContent = await stratus.readFile('/conflict.md');
 		assert.strictEqual(new TextDecoder().decode(localContent), 'Local content');
 	});
 
@@ -235,7 +235,7 @@ test('MiddlewareIndividualFile sync runs', async (t) => {
 		assert.strictEqual(meta.files['/sparse.md'].status, 'clean');
 
 		// Read file should trigger lazy load from remote
-		const content = await stratus.readFile('/sparse.md').finished;
+		const content = await stratus.readFile('/sparse.md');
 		assert.strictEqual(new TextDecoder().decode(content), 'Lazy Loaded');
 	});
 
@@ -251,7 +251,7 @@ test('MiddlewareIndividualFile sync runs', async (t) => {
 			middleware
 		});
 
-		await stratus.writeFile('/atomic.md', new TextEncoder().encode('Atomic data')).finished;
+		await stratus.writeFile('/atomic.md', new TextEncoder().encode('Atomic data'));
 		await stratus.sync();
 
 		assert.ok(backend.atomicWritesTracked.includes('/atomic.md'));

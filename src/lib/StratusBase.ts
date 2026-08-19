@@ -241,35 +241,33 @@ export class StratusBase extends EventTarget {
 	 * In sparse mode, if the file is not yet cached locally, it downloads it on-demand from remote storage.
 	 * @param path Relative path to the file.
 	 */
-	public readFile(path: string): StorageOperation<Uint8Array> {
-		return new BaseStorageOperation<Uint8Array>(async () => {
-			const metadata = await this.getMetadata();
-			const fileMeta = metadata.files[path];
+	public async readFile(path: string): Promise<Uint8Array> {
+		const metadata = await this.getMetadata();
+		const fileMeta = metadata.files[path];
 
-			if (!fileMeta || fileMeta.status === 'deleted') {
-				throw new Error(`File not found: ${path}`);
+		if (!fileMeta || fileMeta.status === 'deleted') {
+			throw new Error(`File not found: ${path}`);
+		}
+
+		try {
+			const fileHandle = await this.getFileHandle(path);
+			const file = await fileHandle.getFile();
+			const buffer = await file.arrayBuffer();
+			return new Uint8Array(buffer);
+		} catch (err) {
+			if (fileMeta.status === 'clean' || fileMeta.status === 'conflict') {
+				const op = this.backend.readFile(path);
+				const content = await op.finished;
+
+				const fileHandle = await this.getFileHandle(path, { create: true });
+				const writable = await fileHandle.createWritable();
+				await writable.write(content as BufferSource);
+				await writable.close();
+
+				return content;
 			}
-
-			try {
-				const fileHandle = await this.getFileHandle(path);
-				const file = await fileHandle.getFile();
-				const buffer = await file.arrayBuffer();
-				return new Uint8Array(buffer);
-			} catch (err) {
-				if (fileMeta.status === 'clean' || fileMeta.status === 'conflict') {
-					const op = this.backend.readFile(path);
-					const content = await op.finished;
-
-					const fileHandle = await this.getFileHandle(path, { create: true });
-					const writable = await fileHandle.createWritable();
-					await writable.write(content as BufferSource);
-					await writable.close();
-
-					return content;
-				}
-				throw err;
-			}
-		});
+			throw err;
+		}
 	}
 
 	/**
@@ -278,31 +276,54 @@ export class StratusBase extends EventTarget {
 	 * @param content Binary content to write.
 	 * @param options Write-then-rename configurations for atomic writes.
 	 */
-	public writeFile(
+	public async writeFile(
 		path: string,
 		content: Uint8Array,
 		options?: WriteOptions
-	): StorageOperation<void> {
-		return new BaseStorageOperation<void>(async () => {
-			const fileHandle = await this.getFileHandle(path, { create: true });
-			const writable = await fileHandle.createWritable();
-			await writable.write(content as BufferSource);
-			await writable.close();
+	): Promise<void> {
+		const fileHandle = await this.getFileHandle(path, { create: true });
+		const writable = await fileHandle.createWritable();
+		await writable.write(content as BufferSource);
+		await writable.close();
 
-			const metadata = await this.getMetadata();
-			const existing = metadata.files[path];
-			metadata.files[path] = {
-				path,
-				type: 'file',
-				size: content.length,
-				localModifiedAt: Date.now(),
-				remoteModifiedAt: existing ? existing.remoteModifiedAt : 0,
-				etag: existing?.etag,
-				status: 'dirty'
-			};
+		const metadata = await this.getMetadata();
+		const existing = metadata.files[path];
+		metadata.files[path] = {
+			path,
+			type: 'file',
+			size: content.length,
+			localModifiedAt: Date.now(),
+			remoteModifiedAt: existing ? existing.remoteModifiedAt : 0,
+			etag: existing?.etag,
+			status: 'dirty'
+		};
 
-			await this.saveMetadata(metadata);
-		});
+		await this.saveMetadata(metadata);
+	}
+
+	/**
+	 * Reads file contents from the local cache as a UTF-8 string.
+	 * Respects sparse mode by fetching from remote storage on-demand if missing locally.
+	 * @param path Relative path to the file.
+	 */
+	public async readTextFile(path: string): Promise<string> {
+		const bytes = await this.readFile(path);
+		return new TextDecoder().decode(bytes);
+	}
+
+	/**
+	 * Writes a UTF-8 string directly to a local file and marks its status as dirty.
+	 * @param path Relative path of the file.
+	 * @param content Text content to write.
+	 * @param options Write-then-rename configurations for atomic writes.
+	 */
+	public async writeTextFile(
+		path: string,
+		content: string,
+		options?: WriteOptions
+	): Promise<void> {
+		const bytes = new TextEncoder().encode(content);
+		await this.writeFile(path, bytes, options);
 	}
 
 	/**

@@ -27,14 +27,14 @@ describe('StratusBase Browser Tests with Native OPFS', () => {
 
 	test('Local CRUD operations write directly to native OPFS', async () => {
 		const content = new TextEncoder().encode('Hello OPFS Browser');
-		await stratus.writeFile('/hello.txt', content).finished;
+		await stratus.writeFile('/hello.txt', content);
 
 		const fileInfo = await stratus.stat('/hello.txt');
 		expect(fileInfo).not.toBeNull();
 		expect(fileInfo?.name).toBe('hello.txt');
 		expect(fileInfo?.size).toBe(content.length);
 
-		const readContent = await stratus.readFile('/hello.txt').finished;
+		const readContent = await stratus.readFile('/hello.txt');
 		expect(new TextDecoder().decode(readContent)).toBe('Hello OPFS Browser');
 
 		await stratus.renameFile('/hello.txt', '/world.txt');
@@ -57,7 +57,7 @@ describe('StratusBase Browser Tests with Native OPFS', () => {
 			etag: 'etag1'
 		});
 
-		await stratus.writeFile('/local.md', new TextEncoder().encode('Local Content')).finished;
+		await stratus.writeFile('/local.md', new TextEncoder().encode('Local Content'));
 
 		const result = await stratus.sync();
 		expect(result.created).toContain('/remote.md');
@@ -66,7 +66,7 @@ describe('StratusBase Browser Tests with Native OPFS', () => {
 		const localStat = await stratus.stat('/remote.md');
 		expect(localStat).not.toBeNull();
 
-		const localData = await stratus.readFile('/remote.md').finished;
+		const localData = await stratus.readFile('/remote.md');
 		expect(new TextDecoder().decode(localData)).toBe('Remote Content');
 
 		const remoteFile = backend.getFilesMap().get('/local.md');
@@ -81,7 +81,7 @@ describe('StratusBase Browser Tests with Native OPFS', () => {
 			etag: 'etag-remote'
 		});
 
-		await stratus.writeFile('/conflict.md', new TextEncoder().encode('Local changes')).finished;
+		await stratus.writeFile('/conflict.md', new TextEncoder().encode('Local changes'));
 
 		const meta = await stratus.getMetadata();
 		meta.files['/conflict.md'].remoteModifiedAt = Date.now() - 10000;
@@ -92,10 +92,10 @@ describe('StratusBase Browser Tests with Native OPFS', () => {
 		const updatesInfo = await stratus.stat('/conflict_updates.md');
 		expect(updatesInfo).not.toBeNull();
 
-		const updatesContent = await stratus.readFile('/conflict_updates.md').finished;
+		const updatesContent = await stratus.readFile('/conflict_updates.md');
 		expect(new TextDecoder().decode(updatesContent)).toBe('Remote changes');
 
-		const localContent = await stratus.readFile('/conflict.md').finished;
+		const localContent = await stratus.readFile('/conflict.md');
 		expect(new TextDecoder().decode(localContent)).toBe('Local changes');
 	});
 });

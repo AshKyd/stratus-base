@@ -70,20 +70,25 @@ const client = new StratusBase({
 
 `StratusBase` exposes standard filesystem operations that interact with the local OPFS cache:
 
-### Writing a file
+### Writing a file (Text Helper)
 ```typescript
-const content = new TextEncoder().encode('# Welcome to StratusBase');
-const writeOp = client.writeFile('/notes/intro.md', content);
-
-// Wait for operation to write locally
-await writeOp.finished;
+await client.writeTextFile('/notes/intro.md', '# Welcome to StratusBase');
 ```
 
-### Reading a file
+### Reading a file (Text Helper)
 ```typescript
-const readOp = client.readFile('/notes/intro.md');
-const bytes = await readOp.finished;
-const markdownText = new TextDecoder().decode(bytes);
+const markdownText = await client.readTextFile('/notes/intro.md');
+```
+
+### Writing raw binary
+```typescript
+const content = new Uint8Array([1, 2, 3]);
+await client.writeFile('/data.bin', content);
+```
+
+### Reading raw binary
+```typescript
+const bytes = await client.readFile('/data.bin');
 ```
 
 ### Listing a directory

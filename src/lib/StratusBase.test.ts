@@ -124,8 +124,7 @@ test('StratusBase local operations', async (t) => {
 
 	await t.test('writeFile and stat', async () => {
 		const content = new TextEncoder().encode('Hello, OPFS!');
-		const writeOp = stratus.writeFile('/test.txt', content);
-		await writeOp.finished;
+		await stratus.writeFile('/test.txt', content);
 
 		const fileInfo = await stratus.stat('/test.txt');
 		assert.ok(fileInfo);
@@ -138,10 +137,16 @@ test('StratusBase local operations', async (t) => {
 	});
 
 	await t.test('readFile', async () => {
-		const readOp = stratus.readFile('/test.txt');
-		const content = await readOp.finished;
+		const content = await stratus.readFile('/test.txt');
 		const text = new TextDecoder().decode(content);
 		assert.strictEqual(text, 'Hello, OPFS!');
+	});
+
+	await t.test('writeTextFile and readTextFile', async () => {
+		await stratus.writeTextFile('/text-helper.txt', 'Hello, StratusBase Text Helper!');
+		const textContent = await stratus.readTextFile('/text-helper.txt');
+		assert.strictEqual(textContent, 'Hello, StratusBase Text Helper!');
+		await stratus.deleteFile('/text-helper.txt');
 	});
 
 	await t.test('renameFile', async () => {
@@ -154,8 +159,7 @@ test('StratusBase local operations', async (t) => {
 		assert.ok(newInfo);
 		assert.strictEqual(newInfo.name, 'renamed.txt');
 
-		const readOp = stratus.readFile('/renamed.txt');
-		const content = await readOp.finished;
+		const content = await stratus.readFile('/renamed.txt');
 		const text = new TextDecoder().decode(content);
 		assert.strictEqual(text, 'Hello, OPFS!');
 	});
@@ -289,9 +293,9 @@ test('StratusBase conflict resolution', async (t) => {
 	await stratus.saveMetadata(metadata);
 
 	// Write content for the updates file
-	await stratus.writeFile('/conflict_updates.txt', new TextEncoder().encode('Remote content')).finished;
+	await stratus.writeFile('/conflict_updates.txt', new TextEncoder().encode('Remote content'));
 	// Write content for original file
-	await stratus.writeFile('/conflict.txt', new TextEncoder().encode('Local cont')).finished;
+	await stratus.writeFile('/conflict.txt', new TextEncoder().encode('Local cont'));
 
 	// Reset original to conflict status manually (since writeFile marked it dirty)
 	const prepMeta = await stratus.getMetadata();
@@ -310,7 +314,6 @@ test('StratusBase conflict resolution', async (t) => {
 	assert.strictEqual(postMeta.files['/conflict.txt'].size, resolvedContent.length);
 
 	// Check final file content
-	const readOp = stratus.readFile('/conflict.txt');
-	const fileBytes = await readOp.finished;
+	const fileBytes = await stratus.readFile('/conflict.txt');
 	assert.strictEqual(new TextDecoder().decode(fileBytes), 'Merged Content');
 });

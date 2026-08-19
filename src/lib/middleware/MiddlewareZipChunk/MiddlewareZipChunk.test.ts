@@ -134,7 +134,7 @@ test('MiddlewareZipChunk sync runs', async (t) => {
 		});
 
 		// Create a local file
-		await stratus.writeFile('/note1.md', new TextEncoder().encode('Hello Chunk')).finished;
+		await stratus.writeFile('/note1.md', new TextEncoder().encode('Hello Chunk'));
 
 		// Sync
 		const result = await stratus.sync();
@@ -200,7 +200,7 @@ test('MiddlewareZipChunk sync runs', async (t) => {
 		assert.strictEqual(initialMeta.chunks, undefined);
 
 		// Create a local dirty file
-		await stratus.writeFile('/new_file.md', new TextEncoder().encode('New file content')).finished;
+		await stratus.writeFile('/new_file.md', new TextEncoder().encode('New file content'));
 
 		// Sync should list remote, find chunk 001, download it, reconstruct cache, and repack it
 		const result = await stratus.sync();
@@ -236,14 +236,14 @@ test('MiddlewareZipChunk sync runs', async (t) => {
 		});
 
 		// 1. Initial write (15 bytes) - fits in chunk 001
-		await stratus.writeFile('/note1.md', new TextEncoder().encode('123456789012345')).finished;
+		await stratus.writeFile('/note1.md', new TextEncoder().encode('123456789012345'));
 		await stratus.sync();
 
 		assert.ok(backend.getFilesMap().has('/archive_chunk_001.zip'));
 		assert.ok(!backend.getFilesMap().has('/archive_chunk_002.zip'));
 
 		// 2. Second write (10 bytes) - total becomes 25 bytes (exceeds 20 limit) -> Rollover!
-		await stratus.writeFile('/note2.md', new TextEncoder().encode('1234567890')).finished;
+		await stratus.writeFile('/note2.md', new TextEncoder().encode('1234567890'));
 		const result = await stratus.sync();
 
 		assert.deepStrictEqual(result.created, ['/note2.md']);
@@ -278,7 +278,7 @@ test('MiddlewareZipChunk sync runs', async (t) => {
 		});
 
 		// 1. Initial write
-		await stratus.writeFile('/note1.md', new TextEncoder().encode('12345')).finished;
+		await stratus.writeFile('/note1.md', new TextEncoder().encode('12345'));
 		await stratus.sync();
 
 		// 2. Delete file
@@ -292,7 +292,7 @@ test('MiddlewareZipChunk sync runs', async (t) => {
 		assert.deepStrictEqual(chunkMeta.deleted, ['/note1.md']);
 
 		// 3. Write new file that triggers rollover (exceeds 20 bytes)
-		await stratus.writeFile('/note2.md', new TextEncoder().encode('1234567890123456789012345')).finished;
+		await stratus.writeFile('/note2.md', new TextEncoder().encode('1234567890123456789012345'));
 		await stratus.sync();
 
 		// Verify chunk 002 exists and its metadata has carried over the deletion list
@@ -340,8 +340,8 @@ test('MiddlewareZipChunk sync runs', async (t) => {
 		assert.deepStrictEqual(result.created.sort(), ['/file1.md', '/file2.md'].sort());
 
 		// Verify files extracted locally
-		const f1 = await stratus.readFile('/file1.md').finished;
-		const f2 = await stratus.readFile('/file2.md').finished;
+		const f1 = await stratus.readFile('/file1.md');
+		const f2 = await stratus.readFile('/file2.md');
 		assert.strictEqual(new TextDecoder().decode(f1), 'Content 1');
 		assert.strictEqual(new TextDecoder().decode(f2), 'Content 2');
 	});
@@ -373,7 +373,7 @@ test('MiddlewareZipChunk sync runs', async (t) => {
 		});
 
 		// Create a local clean file /note1.md (simulating it was present before sync)
-		await stratus.writeFile('/note1.md', new TextEncoder().encode('Local content')).finished;
+		await stratus.writeFile('/note1.md', new TextEncoder().encode('Local content'));
 		// Mark it clean manually so it can be deleted by sync
 		const localMeta = await stratus.getMetadata();
 		localMeta.files['/note1.md'].status = 'clean';
@@ -400,15 +400,15 @@ test('MiddlewareZipChunk sync runs', async (t) => {
 		});
 
 		// 1. Write file1 (15 bytes) -> chunk 001
-		await stratus.writeFile('/file1.md', new TextEncoder().encode('123456789012345')).finished;
+		await stratus.writeFile('/file1.md', new TextEncoder().encode('123456789012345'));
 		await stratus.sync();
 
 		// 2. Overwrite file1 with new content (15 bytes) -> exceeds limit, rollover to chunk 002
-		await stratus.writeFile('/file1.md', new TextEncoder().encode('543210987654321')).finished;
+		await stratus.writeFile('/file1.md', new TextEncoder().encode('543210987654321'));
 		await stratus.sync();
 
 		// 3. Write file2 (15 bytes) -> exceeds limit, rollover to chunk 003
-		await stratus.writeFile('/file2.md', new TextEncoder().encode('abcde12345abcde')).finished;
+		await stratus.writeFile('/file2.md', new TextEncoder().encode('abcde12345abcde'));
 		await stratus.sync();
 
 		// 4. Delete file2
