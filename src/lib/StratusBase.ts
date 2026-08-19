@@ -453,4 +453,58 @@ export class StratusBase extends EventTarget {
 			await (this.middleware as any).consolidate(context);
 		}
 	}
+
+	private appendUpdatesSuffix(filePath: string): string {
+		const lastDot = filePath.lastIndexOf('.');
+		const lastSlash = filePath.lastIndexOf('/');
+		if (lastDot > lastSlash && lastDot !== -1) {
+			return filePath.slice(0, lastDot) + '_updates' + filePath.slice(lastDot);
+		}
+		return filePath + '_updates';
+	}
+
+	private async deleteLocalFileRecord(metadata: StratusMetadata, path: string): Promise<void> {
+		try {
+			const contentRoot = await this.getContentRootHandle(false);
+			const segments = path.split('/').filter(Boolean);
+			const fileName = segments.pop();
+			if (fileName) {
+				const dir = await this.traverseDirectory(contentRoot, segments.join('/'), { create: false });
+				await dir.removeEntry(fileName);
+			}
+		} catch {
+			// File might already not exist locally
+		}
+		delete metadata.files[path];
+	}
+
+	/**
+	 * Resolves a conflict on a given file by writing the final resolved content,
+	 * marking the file as dirty (so it pushes to remote on next sync),
+	 * and deleting the temporary updates file.
+	 */
+	async resolveConflict(path: string, content: Uint8Array): Promise<void> {
+		const metadata = await this.getMetadata();
+		const fileMeta = metadata.files[path];
+		if (!fileMeta || fileMeta.status !== 'conflict') {
+			throw new Error(`File is not in conflict status: ${path}`);
+		}
+
+		// Write content to original file
+		const fileHandle = await this.getFileHandle(path, { create: true });
+		const writable = await fileHandle.createWritable();
+		await writable.write(content as BufferSource);
+		await writable.close();
+
+		// Mark status as dirty so it gets synced/pushed next time
+		fileMeta.status = 'dirty';
+		fileMeta.size = content.length;
+		fileMeta.localModifiedAt = Date.now();
+
+		// Delete the updates file
+		const updatesPath = this.appendUpdatesSuffix(path);
+		await this.deleteLocalFileRecord(metadata, updatesPath);
+
+		await this.saveMetadata(metadata);
+	}
 }

@@ -256,3 +256,61 @@ test('StratusBase EventTarget events', async (t) => {
 		assert.ok(receivedError instanceof Error);
 	});
 });
+
+test('StratusBase conflict resolution', async (t) => {
+	const storageMock = new MockStorageManager();
+	setStorageManager(storageMock);
+
+	const backend = new MockBackend();
+	const stratus = new StratusBase({
+		backend,
+		localRoot: '/app',
+		middleware: mockMiddleware
+	});
+
+	// Prepare metadata with a conflict file and an updates file
+	const metadata = await stratus.getMetadata();
+	metadata.files['/conflict.txt'] = {
+		path: '/conflict.txt',
+		type: 'file',
+		size: 10,
+		localModifiedAt: Date.now() - 5000,
+		remoteModifiedAt: Date.now() - 2000,
+		status: 'conflict'
+	};
+	metadata.files['/conflict_updates.txt'] = {
+		path: '/conflict_updates.txt',
+		type: 'file',
+		size: 15,
+		localModifiedAt: Date.now(),
+		remoteModifiedAt: 0,
+		status: 'clean'
+	};
+	await stratus.saveMetadata(metadata);
+
+	// Write content for the updates file
+	await stratus.writeFile('/conflict_updates.txt', new TextEncoder().encode('Remote content')).finished;
+	// Write content for original file
+	await stratus.writeFile('/conflict.txt', new TextEncoder().encode('Local cont')).finished;
+
+	// Reset original to conflict status manually (since writeFile marked it dirty)
+	const prepMeta = await stratus.getMetadata();
+	prepMeta.files['/conflict.txt'].status = 'conflict';
+	await stratus.saveMetadata(prepMeta);
+
+	// Perform resolution
+	const resolvedContent = new TextEncoder().encode('Merged Content');
+	await stratus.resolveConflict('/conflict.txt', resolvedContent);
+
+	// Check updates file is deleted and metadata is removed
+	const postMeta = await stratus.getMetadata();
+	assert.strictEqual(postMeta.files['/conflict_updates.txt'], undefined);
+	assert.ok(postMeta.files['/conflict.txt']);
+	assert.strictEqual(postMeta.files['/conflict.txt'].status, 'dirty');
+	assert.strictEqual(postMeta.files['/conflict.txt'].size, resolvedContent.length);
+
+	// Check final file content
+	const readOp = stratus.readFile('/conflict.txt');
+	const fileBytes = await readOp.finished;
+	assert.strictEqual(new TextDecoder().decode(fileBytes), 'Merged Content');
+});
