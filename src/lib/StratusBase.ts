@@ -87,13 +87,14 @@ export function setStorageManager(mock: any): void {
 	storageManager = mock;
 }
 
-export class StratusBase {
+export class StratusBase extends EventTarget {
 	private backend: StorageBackend;
 	private localRoot: string;
 	private middleware: StratusMiddleware;
 	private sparse: boolean;
 
 	constructor(options: StratusBaseOptions) {
+		super();
 		this.backend = options.backend;
 		this.localRoot = options.localRoot;
 		this.middleware = options.middleware;
@@ -388,7 +389,21 @@ export class StratusBase {
 			}
 		};
 
-		return await this.middleware.sync(context);
+		this.dispatchEvent(new CustomEvent('syncstart'));
+
+		try {
+			const result = await this.middleware.sync(context);
+			this.dispatchEvent(new CustomEvent('sync', { detail: result }));
+			return result;
+		} catch (err) {
+			if (err instanceof SyncConflictError) {
+				for (const conflict of err.conflicts) {
+					this.dispatchEvent(new CustomEvent('conflict', { detail: conflict }));
+				}
+			}
+			this.dispatchEvent(new CustomEvent('error', { detail: err }));
+			throw err;
+		}
 	}
 
 	async consolidate(): Promise<void> {

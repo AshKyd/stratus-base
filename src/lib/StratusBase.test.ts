@@ -175,3 +175,84 @@ test('StratusBase local operations', async (t) => {
 		assert.strictEqual(meta.files['/renamed.txt'].status, 'deleted');
 	});
 });
+
+test('StratusBase EventTarget events', async (t) => {
+	const storageMock = new MockStorageManager();
+	setStorageManager(storageMock);
+
+	const backend = new MockBackend();
+	
+	await t.test('dispatches syncstart and sync events successfully', async () => {
+		const syncResult = { created: ['/a.txt'], updated: [], deleted: [] };
+		const mockMw = {
+			async sync() {
+				return syncResult;
+			}
+		};
+		const stratus = new StratusBase({
+			backend,
+			localRoot: '/app',
+			middleware: mockMw
+		});
+
+		const events: string[] = [];
+		let receivedResult: any = null;
+
+		stratus.addEventListener('syncstart', () => {
+			events.push('syncstart');
+		});
+
+		stratus.addEventListener('sync', (e) => {
+			events.push('sync');
+			receivedResult = (e as CustomEvent).detail;
+		});
+
+		await stratus.sync();
+
+		assert.deepStrictEqual(events, ['syncstart', 'sync']);
+		assert.deepStrictEqual(receivedResult, syncResult);
+	});
+
+	await t.test('dispatches conflict and error events on sync conflict', async () => {
+		const conflictObj = {
+			path: '/b.txt',
+			localModifiedAt: new Date(),
+			remoteModifiedAt: new Date(),
+			type: 'conflict' as const
+		};
+		const mockMw = {
+			async sync() {
+				const { SyncConflictError } = await import('./StratusBase.ts');
+				throw new SyncConflictError([conflictObj]);
+			}
+		};
+		const stratus = new StratusBase({
+			backend,
+			localRoot: '/app',
+			middleware: mockMw
+		});
+
+		const events: string[] = [];
+		const conflictsReceived: any[] = [];
+		let receivedError: any = null;
+
+		stratus.addEventListener('conflict', (e) => {
+			events.push('conflict');
+			conflictsReceived.push((e as CustomEvent).detail);
+		});
+
+		stratus.addEventListener('error', (e) => {
+			events.push('error');
+			receivedError = (e as CustomEvent).detail;
+		});
+
+		await assert.rejects(async () => {
+			await stratus.sync();
+		});
+
+		assert.ok(events.includes('conflict'));
+		assert.ok(events.includes('error'));
+		assert.deepStrictEqual(conflictsReceived, [conflictObj]);
+		assert.ok(receivedError instanceof Error);
+	});
+});
