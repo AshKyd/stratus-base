@@ -83,6 +83,25 @@ export class S3Storage implements StorageBackend {
 	}
 
 	/**
+	 * Clears credentials and resets the S3 client, disconnecting the session.
+	 */
+	async disconnect(): Promise<void> {
+		this.options.accessKeyId = '';
+		this.options.secretAccessKey = '';
+		this.options.sessionToken = undefined;
+		this.client = new S3Client({
+			region: this.options.region,
+			endpoint: this.options.endpoint,
+			forcePathStyle: this.options.forcePathStyle ?? false,
+			credentials: {
+				accessKeyId: '',
+				secretAccessKey: ''
+			}
+		});
+	}
+
+
+	/**
 	 * Normalises a file path to a standard S3 key.
 	 * Strips the leading slash for standard S3 conventions.
 	 *

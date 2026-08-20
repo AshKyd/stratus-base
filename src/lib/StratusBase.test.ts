@@ -317,3 +317,97 @@ test('StratusBase conflict resolution', async (t) => {
 	const fileBytes = await stratus.readFile('/conflict.txt');
 	assert.strictEqual(new TextDecoder().decode(fileBytes), 'Merged Content');
 });
+
+test('StratusBase sync queueing and coalescing', async (t) => {
+	const storageMock = new MockStorageManager();
+	setStorageManager(storageMock);
+
+	let syncStartCount = 0;
+	let resolveActiveSync: ((value: any) => void) | null = null;
+
+	const slowSyncMiddleware = {
+		sync: async () => {
+			syncStartCount++;
+			return new Promise((resolve) => {
+				resolveActiveSync = resolve;
+			});
+		}
+	};
+
+	const backend = new MockBackend();
+	const stratus = new StratusBase({
+		backend,
+		localRoot: '/app',
+		middleware: slowSyncMiddleware
+	});
+
+	// Trigger first sync
+	const p1 = stratus.sync();
+	assert.strictEqual(syncStartCount, 1);
+	assert.ok(resolveActiveSync !== null);
+	const resolver1 = resolveActiveSync!;
+
+	// Queue subsequent syncs
+	const p2 = stratus.sync();
+	const p3 = stratus.sync();
+
+	// Ensure no new sync started while first is active
+	assert.strictEqual(syncStartCount, 1);
+
+	// Resolve the first sync
+	resolver1({ created: [], updated: [], deleted: [] });
+	await p1;
+
+	// Wait for the next tick to start the queued run
+	await new Promise((resolve) => setTimeout(resolve, 0));
+
+	// The queued run should have started now
+	assert.strictEqual(syncStartCount, 2);
+	assert.ok(resolveActiveSync !== null);
+	const resolver2 = resolveActiveSync!;
+
+	// Resolve the second run
+	resolver2({ created: ['/a.txt'], updated: [], deleted: [] });
+
+	const res2 = await p2;
+	const res3 = await p3;
+
+	// Both subsequent calls should have resolved to the same result
+	assert.deepStrictEqual(res2.created, ['/a.txt']);
+	assert.deepStrictEqual(res3.created, ['/a.txt']);
+	assert.strictEqual(syncStartCount, 2);
+});
+
+test('StratusBase secure storage reset', async (t) => {
+	const storageMock = new MockStorageManager();
+	setStorageManager(storageMock);
+
+	let disconnected = false;
+	const backend = new MockBackend();
+	(backend as any).disconnect = async () => {
+		disconnected = true;
+	};
+
+	const stratus = new StratusBase({
+		backend,
+		localRoot: '/app',
+		middleware: mockMiddleware
+	});
+
+	// Write some metadata and files to establish OPFS structure
+	await stratus.writeFile('/hello.txt', new TextEncoder().encode('Hello World'));
+	const statBefore = await stratus.stat('/hello.txt');
+	assert.ok(statBefore !== null);
+
+	// Perform reset
+	await stratus.reset();
+
+	// Check backend disconnect was called
+	assert.strictEqual(disconnected, true);
+
+	// Check files are deleted and no longer exist in OPFS
+	const statAfter = await stratus.stat('/hello.txt');
+	assert.strictEqual(statAfter, null);
+});
+
+

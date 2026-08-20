@@ -100,6 +100,14 @@ export class GithubStorage implements StorageBackend {
 	}
 
 	/**
+	 * Clears credentials, disconnecting from Github.
+	 */
+	async disconnect(): Promise<void> {
+		this.accessToken = undefined;
+	}
+
+
+	/**
 	 * Helper to generate default GitHub API headers.
 	 */
 	private getHeaders(): HeadersInit {

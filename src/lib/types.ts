@@ -78,6 +78,11 @@ export interface StorageBackend {
 	 */
 	setCredentials?(credentials: StorageAuthCredentials): void;
 
+	/**
+	 * Clears credentials and configuration, disconnecting the session.
+	 */
+	disconnect?(): Promise<void>;
+
 	// --- File Operations ---
 
 	/**

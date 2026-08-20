@@ -193,6 +193,16 @@ export class DropboxStorage implements StorageBackend {
 	}
 
 	/**
+	 * Clears the active credentials from the Dropbox session.
+	 */
+	async disconnect(): Promise<void> {
+		this.auth.setAccessToken('');
+		this.auth.setRefreshToken('');
+		this.auth.setAccessTokenExpiresAt(undefined as any);
+	}
+
+
+	/**
 	 * Retrieves metadata for a file or directory at the specified path.
 	 *
 	 * @param path The absolute path in Dropbox (e.g., "/notes/todo.md").

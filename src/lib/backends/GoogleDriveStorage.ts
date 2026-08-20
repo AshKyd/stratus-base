@@ -108,6 +108,17 @@ export class GoogleDriveStorage implements StorageBackend {
 	}
 
 	/**
+	 * Clears credentials and cached metadata, disconnecting Google Drive.
+	 */
+	async disconnect(): Promise<void> {
+		this.accessToken = undefined;
+		this.refreshToken = undefined;
+		this.expiresAt = undefined;
+		this.rootFolderId = undefined;
+	}
+
+
+	/**
 	 * Resolves the root folder ID, creating the custom folder if configured.
 	 */
 	private async getRootFolderId(): Promise<string> {

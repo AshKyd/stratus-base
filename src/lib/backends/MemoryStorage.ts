@@ -249,4 +249,13 @@ export class MemoryStorage implements StorageBackend {
 	getFilesMap(): Map<string, { content: Uint8Array; modifiedAt: Date; etag?: string }> {
 		return this.files;
 	}
+
+	/**
+	 * Clears all in-memory files.
+	 */
+	async disconnect(): Promise<void> {
+		this.files.clear();
+		this.atomicWritesTracked.length = 0;
+	}
 }
+

@@ -167,3 +167,15 @@ const resolvedBytes = new TextEncoder().encode('Merged Content Here');
 await client.resolveConflict('/notes/intro.md', resolvedBytes);
 // The temporary updates file is automatically cleaned up and the file is marked dirty to push next sync.
 ```
+
+---
+
+## 9. Resetting Client and Session (Logout)
+
+To securely clear the local cache and remove user sessions when logging out of the application:
+
+```typescript
+// Deletes the local OPFS storage folder recursively and clears active credentials/tokens on the backend
+await client.reset();
+```
+

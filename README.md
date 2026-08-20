@@ -73,6 +73,17 @@ const result = await client.sync();
 console.log(result.created, result.updated, result.deleted);
 ```
 
+> [!NOTE]
+> Concurrent calls to `sync()` are queued and coalesced automatically. If multiple sync operations are requested while a sync is already active, they will wait and run exactly once in a single coalesced follow-up execution.
+
+### 4. Session Reset & Logout
+
+Call `reset()` to recursively delete the local cache folder in OPFS and clear credentials on the configured backend:
+
+```typescript
+await client.reset();
+```
+
 ---
 
 ## Testing

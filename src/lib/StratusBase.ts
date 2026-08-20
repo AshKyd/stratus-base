@@ -1,5 +1,6 @@
 import type { StorageBackend, StorageFileInfo, StorageOperation, WriteOptions } from './types.ts';
 import { BaseStorageOperation } from './utils/BaseStorageOperation.ts';
+import { debounceAsync } from './utils/debounceAsync.ts';
 
 export interface FileMetadata {
 	path: string;
@@ -450,7 +451,7 @@ export class StratusBase extends EventTarget {
 	 * Dispatches `syncstart`, `sync`, `conflict`, and `error` events.
 	 * Throws `SyncConflictError` if conflict conditions arise.
 	 */
-	public async sync(): Promise<SyncResult> {
+	public sync = debounceAsync(async (): Promise<SyncResult> => {
 		const context: StratusSyncContext = {
 			backend: this.backend,
 			localRoot: this.localRoot,
@@ -510,7 +511,8 @@ export class StratusBase extends EventTarget {
 			this.dispatchEvent(new CustomEvent('error', { detail: err }));
 			throw err;
 		}
-	}
+	});
+
 
 	/**
 	 * Defragments the database storage layout on support middleware.
@@ -628,5 +630,32 @@ export class StratusBase extends EventTarget {
 		await this.deleteLocalFileRecord(metadata, updatesPath);
 
 		await this.saveMetadata(metadata);
+	}
+
+	/**
+	 * Securely deletes all local OPFS files and configuration under the client root folder,
+	 * and disconnects/resets the backend.
+	 */
+	public async reset(): Promise<void> {
+		// 1. Wipe local OPFS storage
+		try {
+			const root = await this.getRootHandle();
+			const segments = this.localRoot.split('/').filter(Boolean);
+			if (segments.length > 0) {
+				const lastSegment = segments.pop()!;
+				const parentPath = segments.join('/');
+				const parentHandle = await this.traverseDirectory(root, parentPath, { create: false });
+				await parentHandle.removeEntry(lastSegment, { recursive: true });
+			}
+		} catch {
+			// Ignore if directory doesn't exist or deletion fails
+		}
+
+		// 2. Disconnect backend
+		if (typeof this.backend.disconnect === 'function') {
+			await this.backend.disconnect();
+		} else if (typeof this.backend.setCredentials === 'function') {
+			this.backend.setCredentials({});
+		}
 	}
 }
