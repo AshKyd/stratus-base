@@ -44,6 +44,15 @@ export class SyncConflictError extends Error {
 	}
 }
 
+export class SyncLockedError extends Error {
+	public lockDetails: { date: string; clientName: string; operation: string };
+	constructor(lockDetails: { date: string; clientName: string; operation: string }) {
+		super(`Sync is locked by ${lockDetails.clientName} since ${lockDetails.date} (Operation: ${lockDetails.operation})`);
+		this.name = 'SyncLockedError';
+		this.lockDetails = lockDetails;
+	}
+}
+
 export interface SyncResult {
 	created: string[];
 	updated: string[];
@@ -75,6 +84,8 @@ export interface StratusBaseOptions {
 	middleware: StratusMiddleware;
 	/** Delay downloading remote file contents until explicitly read. Defaults to false. */
 	sparse?: boolean;
+	/** Unique name identifying this client device. Fallbacks to a generated random string. */
+	clientName?: string;
 }
 
 let storageManager: StorageManager | undefined =
@@ -92,6 +103,7 @@ export class StratusBase extends EventTarget {
 	private localRoot: string;
 	private middleware: StratusMiddleware;
 	private sparse: boolean;
+	private clientName: string;
 
 	/**
 	 * Initialises a new StratusBase sync client instance.
@@ -103,6 +115,7 @@ export class StratusBase extends EventTarget {
 		this.localRoot = options.localRoot ?? '/stratus';
 		this.middleware = options.middleware;
 		this.sparse = options.sparse ?? false;
+		this.clientName = options.clientName ?? `Client-${Math.random().toString(36).substring(2, 10)}`;
 	}
 
 	// --- OPFS Helper Methods ---
@@ -447,69 +460,129 @@ export class StratusBase extends EventTarget {
 	// --- Sync Operation ---
 
 	/**
+	 * Checks if the remote storage is currently locked by another client.
+	 * @returns True if synchronization is possible, false if it is locked.
+	 */
+	public async canSync(): Promise<boolean> {
+		try {
+			const stat = await this.backend.stat('/sync.lock');
+			return stat === null;
+		} catch {
+			return true;
+		}
+	}
+
+	/**
+	 * Forcefully clears any existing sync lock and starts a synchronisation.
+	 */
+	public async forceSync(): Promise<SyncResult> {
+		try {
+			await this.backend.deleteFile('/sync.lock');
+		} catch {
+			// Ignore if lockfile did not exist
+		}
+		return this.sync();
+	}
+
+	/**
 	 * Synchronises client local files and metadata with the remote storage backend.
 	 * Dispatches `syncstart`, `sync`, `conflict`, and `error` events.
-	 * Throws `SyncConflictError` if conflict conditions arise.
+	 * Throws `SyncLockedError` if the remote storage is locked, or `SyncConflictError` if conflict conditions arise.
 	 */
 	public sync = debounceAsync(async (): Promise<SyncResult> => {
-		const context: StratusSyncContext = {
-			backend: this.backend,
-			localRoot: this.localRoot,
-			sparse: this.sparse,
-			getLocalMetadata: () => this.getMetadata(),
-			saveLocalMetadata: (meta) => this.saveMetadata(meta),
-			readLocalFile: async (path) => {
-				const handle = await this.getFileHandle(path);
-				const file = await handle.getFile();
-				return new Uint8Array(await file.arrayBuffer());
-			},
-			writeLocalFile: async (path, content) => {
-				const handle = await this.getFileHandle(path, { create: true });
-				const writable = await handle.createWritable();
-				await writable.write(content as BufferSource);
-				await writable.close();
-			},
-			deleteLocalFile: async (path) => {
-				try {
-					const contentRoot = await this.getContentRootHandle(false);
-					const segments = path.split('/').filter(Boolean);
-					const fileName = segments.pop();
-					if (fileName) {
-						const dir = await this.traverseDirectory(contentRoot, segments.join('/'), {
-							create: false
-						});
-						await dir.removeEntry(fileName);
-					}
-				} catch {
-					// File might already not exist locally
-				}
-			},
-			markClean: async (path, remoteModifiedAt, etag) => {
-				const meta = await this.getMetadata();
-				const existing = meta.files[path];
-				if (existing) {
-					existing.status = 'clean';
-					existing.remoteModifiedAt = remoteModifiedAt.getTime();
-					existing.etag = etag;
-					await this.saveMetadata(meta);
+		// Concurrency Check (Cooperative Lockfile)
+		const lockStat = await this.backend.stat('/sync.lock');
+		if (lockStat) {
+			let lockDetails = { date: new Date().toISOString(), clientName: 'Unknown Client', operation: 'sync' };
+			try {
+				const op = this.backend.readFile('/sync.lock');
+				const bytes = await op.finished;
+				lockDetails = JSON.parse(new TextDecoder().decode(bytes));
+			} catch {
+				if (lockStat.modifiedAt) {
+					lockDetails.date = lockStat.modifiedAt.toISOString();
 				}
 			}
-		};
+			const lockError = new SyncLockedError(lockDetails);
+			this.dispatchEvent(new CustomEvent('error', { detail: lockError }));
+			throw lockError;
+		}
 
-		this.dispatchEvent(new CustomEvent('syncstart'));
+		// Write lockfile
+		const lockDetails = {
+			date: new Date().toISOString(),
+			clientName: this.clientName,
+			operation: 'sync'
+		};
+		const lockBytes = new TextEncoder().encode(JSON.stringify(lockDetails, null, 2));
+		await this.backend.writeFile('/sync.lock', lockBytes, { atomic: true }).finished;
 
 		try {
-			const result = await this.middleware.sync(context);
-			this.dispatchEvent(new CustomEvent('sync', { detail: result }));
-			return result;
-		} catch (err) {
-			if (err instanceof SyncConflictError) {
-				for (const conflict of err.conflicts) {
-					this.dispatchEvent(new CustomEvent('conflict', { detail: conflict }));
+			const context: StratusSyncContext = {
+				backend: this.backend,
+				localRoot: this.localRoot,
+				sparse: this.sparse,
+				getLocalMetadata: () => this.getMetadata(),
+				saveLocalMetadata: (meta) => this.saveMetadata(meta),
+				readLocalFile: async (path) => {
+					const handle = await this.getFileHandle(path);
+					const file = await handle.getFile();
+					return new Uint8Array(await file.arrayBuffer());
+				},
+				writeLocalFile: async (path, content) => {
+					const handle = await this.getFileHandle(path, { create: true });
+					const writable = await handle.createWritable();
+					await writable.write(content as BufferSource);
+					await writable.close();
+				},
+				deleteLocalFile: async (path) => {
+					try {
+						const contentRoot = await this.getContentRootHandle(false);
+						const segments = path.split('/').filter(Boolean);
+						const fileName = segments.pop();
+						if (fileName) {
+							const dir = await this.traverseDirectory(contentRoot, segments.join('/'), {
+								create: false
+							});
+							await dir.removeEntry(fileName);
+						}
+					} catch {
+						// File might already not exist locally
+					}
+				},
+				markClean: async (path, remoteModifiedAt, etag) => {
+					const meta = await this.getMetadata();
+					const existing = meta.files[path];
+					if (existing) {
+						existing.status = 'clean';
+						existing.remoteModifiedAt = remoteModifiedAt.getTime();
+						existing.etag = etag;
+						await this.saveMetadata(meta);
+					}
 				}
+			};
+
+			this.dispatchEvent(new CustomEvent('syncstart'));
+
+			try {
+				const result = await this.middleware.sync(context);
+				this.dispatchEvent(new CustomEvent('sync', { detail: result }));
+				return result;
+			} catch (err) {
+				if (err instanceof SyncConflictError) {
+					for (const conflict of err.conflicts) {
+						this.dispatchEvent(new CustomEvent('conflict', { detail: conflict }));
+					}
+				}
+				this.dispatchEvent(new CustomEvent('error', { detail: err }));
+				throw err;
 			}
-			this.dispatchEvent(new CustomEvent('error', { detail: err }));
-			throw err;
+		} finally {
+			try {
+				await this.backend.deleteFile('/sync.lock');
+			} catch {
+				// Ignore errors deleting lockfile on cleanup
+			}
 		}
 	});
 

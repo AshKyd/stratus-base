@@ -343,6 +343,7 @@ test('StratusBase sync queueing and coalescing', async (t) => {
 
 	// Trigger first sync
 	const p1 = stratus.sync();
+	await new Promise((resolve) => setTimeout(resolve, 0));
 	assert.strictEqual(syncStartCount, 1);
 	assert.ok(resolveActiveSync !== null);
 	const resolver1 = resolveActiveSync!;
@@ -409,5 +410,83 @@ test('StratusBase secure storage reset', async (t) => {
 	const statAfter = await stratus.stat('/hello.txt');
 	assert.strictEqual(statAfter, null);
 });
+
+test('StratusBase remote lockfile concurrency control', async (t) => {
+	const storageMock = new MockStorageManager();
+	setStorageManager(storageMock);
+
+	const backend = new MockBackend();
+	let lockFileExists = false;
+	let lockFileContent = new Uint8Array();
+
+	(backend as any).stat = async (path: string) => {
+		if (path === '/sync.lock' && lockFileExists) {
+			return { path: '/sync.lock', name: 'sync.lock', type: 'file', size: lockFileContent.length, modifiedAt: new Date() };
+		}
+		return null;
+	};
+	(backend as any).readFile = (path: string) => {
+		if (path === '/sync.lock' && lockFileExists) {
+			return { finished: Promise.resolve(lockFileContent) };
+		}
+		throw new Error('File not found');
+	};
+	(backend as any).writeFile = (path: string, content: Uint8Array) => {
+		if (path === '/sync.lock') {
+			lockFileExists = true;
+			lockFileContent = content;
+		}
+		return { finished: Promise.resolve() };
+	};
+	(backend as any).deleteFile = async (path: string) => {
+		if (path === '/sync.lock') {
+			lockFileExists = false;
+		}
+	};
+
+	const stratus1 = new StratusBase({
+		backend,
+		localRoot: '/app1',
+		middleware: mockMiddleware,
+		clientName: 'Device A'
+	});
+
+	const stratus2 = new StratusBase({
+		backend,
+		localRoot: '/app2',
+		middleware: mockMiddleware,
+		clientName: 'Device B'
+	});
+
+	// Initially we can sync
+	assert.strictEqual(await stratus1.canSync(), true);
+
+	// Simulate concurrent sync by setting the lock manually
+	lockFileExists = true;
+	lockFileContent = new TextEncoder().encode(JSON.stringify({
+		date: new Date().toISOString(),
+		clientName: 'Device A',
+		operation: 'sync'
+	}, null, 2));
+
+	// Device B should see it cannot sync
+	assert.strictEqual(await stratus2.canSync(), false);
+
+	// Running sync on Device B should reject with SyncLockedError
+	const { SyncLockedError } = await import('./StratusBase.ts');
+	await assert.rejects(async () => {
+		await stratus2.sync();
+	}, (err: any) => {
+		assert.ok(err instanceof SyncLockedError);
+		assert.strictEqual(err.lockDetails.clientName, 'Device A');
+		return true;
+	});
+
+	// Force sync should break the lock and succeed
+	const res = await stratus2.forceSync();
+	assert.deepStrictEqual(res, { created: [], updated: [], deleted: [] });
+	assert.strictEqual(lockFileExists, false); // Lock is cleaned up after successful forceSync
+});
+
 
 

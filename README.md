@@ -76,7 +76,22 @@ console.log(result.created, result.updated, result.deleted);
 > [!NOTE]
 > Concurrent calls to `sync()` are queued and coalesced automatically. If multiple sync operations are requested while a sync is already active, they will wait and run exactly once in a single coalesced follow-up execution.
 
-### 4. Session Reset & Logout
+### 4. Cooperative Lockfile (Concurrency Control)
+
+To prevent multiple clients from syncing concurrently, `StratusBase` creates a remote `/sync.lock` file while syncing.
+
+- `client.canSync()` returns `true` if free, or `false` if locked.
+- `client.sync()` will throw a `SyncLockedError` if locked.
+- `client.forceSync()` clears the lockfile and starts a sync.
+
+```typescript
+// Check remote lock status
+if (await client.canSync()) {
+	await client.sync();
+}
+```
+
+### 5. Session Reset & Logout
 
 Call `reset()` to recursively delete the local cache folder in OPFS and clear credentials on the configured backend:
 

@@ -117,11 +117,25 @@ try {
 } catch (err) {
 	if (err.name === 'SyncConflictError') {
 		console.warn('Sync finished with conflicts. Handle resolution.');
+	} else if (err.name === 'SyncLockedError') {
+		console.warn(`Sync is locked by ${err.lockDetails.clientName} (started at ${err.lockDetails.date}).`);
 	} else {
 		console.error('Sync failed:', err);
 	}
 }
 ```
+
+### Checking and Breaking Locks (Optional)
+If you want to check if the remote repository is locked before triggering a sync, or force a sync by breaking an existing lock:
+
+```typescript
+// Check if backend is locked
+const available = await client.canSync();
+
+// Force-clear any existing lock and trigger a sync
+const result = await client.forceSync();
+```
+
 
 ---
 

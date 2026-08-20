@@ -50,7 +50,8 @@ export class MiddlewareIndividualFile implements StratusMiddleware {
 	}
 
 	async sync(context: StratusSyncContext): Promise<SyncResult> {
-		const remoteFiles = await this.listRemoteFilesRecursive(context.backend, '/');
+		const remoteFiles = (await this.listRemoteFilesRecursive(context.backend, '/'))
+			.filter((rf) => rf.path !== '/sync.lock');
 		const remoteMap = new Map<string, StorageFileInfo>();
 		for (const rf of remoteFiles) {
 			remoteMap.set(rf.path, rf);
