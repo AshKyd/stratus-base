@@ -342,7 +342,9 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 				currentChunk.uncompressedSize = Array.from(filesMap.entries())
 					.filter(([name]) => name !== '.metadata.json')
 					.reduce((acc, [, bytes]) => acc + bytes.length, 0);
-				await this.writeChunk(context, currentChunkPath, filesMap, currentChunk);
+				const tempPath = `/temp_sync_archive_chunk_${String(currentChunkNum).padStart(3, '0')}.zip`;
+				await this.writeChunk(context, tempPath, filesMap, currentChunk);
+				await context.backend.renameFile(tempPath, currentChunkPath);
 				metadata.chunks[currentChunkPath] = { ...currentChunk };
 
 				// 2. Rollover to new chunk
@@ -407,7 +409,9 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 				.filter(([name]) => name !== '.metadata.json')
 				.reduce((acc, [, bytes]) => acc + bytes.length, 0);
 			
-			await this.writeChunk(context, currentChunkPath, filesMap, currentChunk);
+			const tempPath = `/temp_sync_archive_chunk_${String(currentChunkNum).padStart(3, '0')}.zip`;
+			await this.writeChunk(context, tempPath, filesMap, currentChunk);
+			await context.backend.renameFile(tempPath, currentChunkPath);
 			metadata.chunks[currentChunkPath] = currentChunk;
 		}
 	}
