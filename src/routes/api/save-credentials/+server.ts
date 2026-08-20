@@ -35,6 +35,9 @@ export const POST: RequestHandler = async ({ request }) => {
 	if (config.clientId) {
 		updates[`${prefix}_CLIENT_ID`] = config.clientId;
 	}
+	if (config.folderName) {
+		updates[`${prefix}_FOLDER_NAME`] = config.folderName;
+	}
 
 	// Map credentials
 	if (credentials.accessToken) {

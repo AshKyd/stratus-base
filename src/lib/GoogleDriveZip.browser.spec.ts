@@ -32,11 +32,11 @@ describe.runIf(hasAccessToken)('Google Drive Storage with Zip Middleware E2E Str
 		try {
 			const remoteFiles = await backend.listDirectory('/');
 			const chunks = remoteFiles
-				.filter(f => f.name.startsWith('archive_chunk_'))
+				.filter((f) => f.name.startsWith('archive_chunk_'))
 				.sort((a, b) => a.name.localeCompare(b.name));
-				
+
 			const meta = await stratusInstance.getMetadata();
-			
+
 			await logToHost(`Current Google Drive Archives:`);
 			if (chunks.length === 0) {
 				await logToHost(`  (no archives found in root)`);
@@ -44,10 +44,14 @@ describe.runIf(hasAccessToken)('Google Drive Storage with Zip Middleware E2E Str
 			for (const chunk of chunks) {
 				const cachedMeta = meta.chunks?.[chunk.path];
 				const uncompressedSize = cachedMeta?.uncompressedSize ?? 0;
-				const filesList = cachedMeta?.files 
-					? Object.entries(cachedMeta.files).map(([name, fMeta]) => `${name} (${fMeta.size} bytes)`).join(', ')
+				const filesList = cachedMeta?.files
+					? Object.entries(cachedMeta.files)
+							.map(([name, fMeta]) => `${name} (${fMeta.size} bytes)`)
+							.join(', ')
 					: 'none';
-				await logToHost(`  - ${chunk.name} | Compressed: ${chunk.size} B | Uncompressed: ${uncompressedSize} B | Files: [${filesList}]`);
+				await logToHost(
+					`  - ${chunk.name} | Compressed: ${chunk.size} B | Uncompressed: ${uncompressedSize} B | Files: [${filesList}]`
+				);
 			}
 			await logToHost(``);
 		} catch (e: any) {
@@ -70,7 +74,8 @@ describe.runIf(hasAccessToken)('Google Drive Storage with Zip Middleware E2E Str
 
 		// Initialize Google Drive Storage using injected dev env tokens
 		backend = new GoogleDriveStorage({
-			clientId: process.env.GOOGLE_CLIENT_ID || ''
+			clientId: process.env.GOOGLE_CLIENT_ID || '',
+			folderName: process.env.GOOGLE_FOLDER_NAME || 'StratusE2ETests'
 		});
 		backend.setCredentials({
 			accessToken: process.env.GOOGLE_ACCESS_TOKEN || '',
@@ -80,10 +85,14 @@ describe.runIf(hasAccessToken)('Google Drive Storage with Zip Middleware E2E Str
 		// Clean up any remaining remote archive chunks from previous runs
 		try {
 			const files = await backend.listDirectory('/');
-			const chunkFiles = files.filter(f => f.name.startsWith('archive_chunk_') || f.name.startsWith('temp_archive_chunk_'));
+			const chunkFiles = files.filter(
+				(f) => f.name.startsWith('archive_chunk_') || f.name.startsWith('temp_archive_chunk_')
+			);
 			if (chunkFiles.length > 0) {
-				await logToHost(`Cleaning up old remote chunk files: ${chunkFiles.map(f => f.name).join(', ')}`);
-				await Promise.all(chunkFiles.map(f => backend.deleteFile(f.path)));
+				await logToHost(
+					`Cleaning up old remote chunk files: ${chunkFiles.map((f) => f.name).join(', ')}`
+				);
+				await Promise.all(chunkFiles.map((f) => backend.deleteFile(f.path)));
 				await logToHost('Old remote chunk files deleted successfully.');
 			}
 		} catch (e) {
@@ -105,10 +114,14 @@ describe.runIf(hasAccessToken)('Google Drive Storage with Zip Middleware E2E Str
 		// Clean up remote storage to leave Google Drive clean after tests
 		try {
 			const files = await backend.listDirectory('/');
-			const chunkFiles = files.filter(f => f.name.startsWith('archive_chunk_') || f.name.startsWith('temp_archive_chunk_'));
+			const chunkFiles = files.filter(
+				(f) => f.name.startsWith('archive_chunk_') || f.name.startsWith('temp_archive_chunk_')
+			);
 			if (chunkFiles.length > 0) {
-				await logToHost(`Teardown: Deleting remaining remote chunk files: ${chunkFiles.map(f => f.name).join(', ')}`);
-				await Promise.all(chunkFiles.map(f => backend.deleteFile(f.path)));
+				await logToHost(
+					`Teardown: Deleting remaining remote chunk files: ${chunkFiles.map((f) => f.name).join(', ')}`
+				);
+				await Promise.all(chunkFiles.map((f) => backend.deleteFile(f.path)));
 			}
 		} catch (e) {
 			await logToHost(`Final remote cleanup failed: ${e}`);
@@ -158,7 +171,9 @@ describe.runIf(hasAccessToken)('Google Drive Storage with Zip Middleware E2E Str
 		expect(txtDecoder.decode(read2)).toBe('Nested subfolder file content.');
 
 		// 4. Update an existing file & write a new one & delete the temporary file
-		await logToHost('4. Updating files (/doc1.txt updated, /new-file.txt created, /temp.txt deleted)...');
+		await logToHost(
+			'4. Updating files (/doc1.txt updated, /new-file.txt created, /temp.txt deleted)...'
+		);
 		const updatedContent = txtEncoder.encode('Updated Hello Google Drive from Zip E2E!');
 		await stratus.writeFile('/doc1.txt', updatedContent);
 
@@ -219,8 +234,10 @@ describe.runIf(hasAccessToken)('Google Drive Storage with Zip Middleware E2E Str
 		const fileSize = Math.floor(1.1 * 1024 * 1024);
 		const zeroBuffer = new Uint8Array(fileSize);
 
-		await logToHost('Writing 5 large files (1.1MB each) and syncing sequentially to force 5 separate chunks...');
-		
+		await logToHost(
+			'Writing 5 large files (1.1MB each) and syncing sequentially to force 5 separate chunks...'
+		);
+
 		await stratus.writeFile('/file1.bin', zeroBuffer);
 		await stratus.sync();
 		await logArchiveState(stratus, 'Write & sync /file1.bin');
@@ -243,11 +260,13 @@ describe.runIf(hasAccessToken)('Google Drive Storage with Zip Middleware E2E Str
 
 		// Verify 5 remote chunks exist
 		let remoteFiles = await backend.listDirectory('/');
-		let chunkFiles = remoteFiles.filter(f => f.name.startsWith('archive_chunk_'));
+		let chunkFiles = remoteFiles.filter((f) => f.name.startsWith('archive_chunk_'));
 		expect(chunkFiles.length).toBe(5);
 
 		// Edit /file1.bin (originally in chunk 1)
-		await logToHost('Editing /file1.bin to force a 6th chunk rollover (size limit exceeded in active chunk)...');
+		await logToHost(
+			'Editing /file1.bin to force a 6th chunk rollover (size limit exceeded in active chunk)...'
+		);
 		const updatedFile1 = new Uint8Array(fileSize);
 		updatedFile1[0] = 42;
 		await stratus.writeFile('/file1.bin', updatedFile1);
@@ -256,7 +275,7 @@ describe.runIf(hasAccessToken)('Google Drive Storage with Zip Middleware E2E Str
 		await logArchiveState(stratus, 'Sync edited /file1.bin (6 chunks expected)');
 
 		remoteFiles = await backend.listDirectory('/');
-		chunkFiles = remoteFiles.filter(f => f.name.startsWith('archive_chunk_'));
+		chunkFiles = remoteFiles.filter((f) => f.name.startsWith('archive_chunk_'));
 		expect(chunkFiles.length).toBe(6);
 
 		// Consolidate/defrag back to 5 chunks
@@ -265,7 +284,7 @@ describe.runIf(hasAccessToken)('Google Drive Storage with Zip Middleware E2E Str
 		await logArchiveState(stratus, 'Consolidation/Defrag completed');
 
 		remoteFiles = await backend.listDirectory('/');
-		chunkFiles = remoteFiles.filter(f => f.name.startsWith('archive_chunk_'));
+		chunkFiles = remoteFiles.filter((f) => f.name.startsWith('archive_chunk_'));
 		expect(chunkFiles.length).toBe(5);
 
 		// Verify local clearance and re-sync recovery
@@ -312,7 +331,7 @@ describe.runIf(hasAccessToken)('Google Drive Storage with Zip Middleware E2E Str
 
 		// Verify 5 remote chunks exist
 		const remoteFiles = await backend.listDirectory('/');
-		const chunkFiles = remoteFiles.filter(f => f.name.startsWith('archive_chunk_'));
+		const chunkFiles = remoteFiles.filter((f) => f.name.startsWith('archive_chunk_'));
 		expect(chunkFiles.length).toBe(5);
 
 		await logToHost('Single-sync Split Test Successful.');

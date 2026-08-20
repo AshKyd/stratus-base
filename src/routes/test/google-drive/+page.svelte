@@ -12,21 +12,31 @@
 			type: 'text' as const,
 			placeholder: 'Enter your Google client ID',
 			helpText: 'Obtained from the credentials page of your project in the Google Cloud Console.'
+		},
+		{
+			key: 'folderName',
+			label: 'Google Drive Folder Name',
+			type: 'text' as const,
+			placeholder: 'Enter root folder name (optional)',
+			helpText: 'Scopes all files and folders inside this user-visible directory.'
 		}
 	];
 
 	async function handleConfigure(configValues: Record<string, string>) {
 		backend = new GoogleDriveStorage({
-			clientId: configValues.clientId.trim()
+			clientId: configValues.clientId.trim(),
+			folderName: configValues.folderName?.trim() || undefined
 		});
 	}
 
-	// Initialize backend if last client ID is saved in localStorage
+	// Initialize backend if last config is saved in localStorage
 	if (typeof window !== 'undefined') {
 		const savedClientId = localStorage.getItem('tester_config_google-drive_clientId');
+		const savedFolder = localStorage.getItem('tester_config_google-drive_folderName');
 		if (savedClientId) {
 			backend = new GoogleDriveStorage({
-				clientId: savedClientId.trim()
+				clientId: savedClientId.trim(),
+				folderName: savedFolder?.trim() || undefined
 			});
 		}
 	}
@@ -68,8 +78,10 @@
 								e.preventDefault();
 								const fd = new FormData(e.currentTarget);
 								const clientId = fd.get('clientId') as string;
+								const folderName = fd.get('folderName') as string;
 								localStorage.setItem('tester_config_google-drive_clientId', clientId || '');
-								handleConfigure({ clientId });
+								localStorage.setItem('tester_config_google-drive_folderName', folderName || '');
+								handleConfigure({ clientId, folderName });
 							}}
 							style="display: flex; flex-direction: column; gap: 1.25rem;"
 						>
@@ -86,6 +98,20 @@
 									required
 								/>
 							</Field>
+
+							<Field
+								label="Google Drive Folder Name"
+								hint="All files will be stored inside this folder (e.g. StratusBase)."
+								for="folderName"
+							>
+								<TextInput
+									type="text"
+									id="folderName"
+									name="folderName"
+									placeholder="Enter folder name (optional, defaults to root)"
+								/>
+							</Field>
+
 							<Button type="submit" variant="accent" style="width: 100%">
 								Save and Continue
 							</Button>

@@ -98,7 +98,6 @@
 		if (savedCreds && backend.setCredentials) {
 			const credentials = JSON.parse(savedCreds);
 			backend.setCredentials(credentials);
-			await saveCredentialsToServer(credentials);
 		}
 
 		isConfigured = await backend.isConfigured();

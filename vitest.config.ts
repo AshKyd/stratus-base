@@ -11,7 +11,8 @@ export default defineConfig(({ mode }) => {
 		define: {
 			'process.env.GOOGLE_CLIENT_ID': JSON.stringify(env.GOOGLE_CLIENT_ID || ''),
 			'process.env.GOOGLE_ACCESS_TOKEN': JSON.stringify(env.GOOGLE_ACCESS_TOKEN || ''),
-			'process.env.GOOGLE_EXPIRES_AT': JSON.stringify(env.GOOGLE_EXPIRES_AT || '')
+			'process.env.GOOGLE_EXPIRES_AT': JSON.stringify(env.GOOGLE_EXPIRES_AT || ''),
+			'process.env.GOOGLE_FOLDER_NAME': JSON.stringify(env.GOOGLE_FOLDER_NAME || '')
 		},
 		test: {
 			include: ['src/**/*.browser.spec.ts'],

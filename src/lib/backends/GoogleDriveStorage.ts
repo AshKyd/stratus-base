@@ -21,6 +21,10 @@ export interface GoogleDriveStorageOptions {
 	 * Optional stored credentials to restore an existing session.
 	 */
 	credentials?: StorageAuthCredentials;
+	/**
+	 * Optional custom root folder name to scope files.
+	 */
+	folderName?: string;
 }
 
 /**
@@ -33,12 +37,15 @@ export class GoogleDriveStorage implements StorageBackend {
 	private accessToken?: string;
 	private refreshToken?: string;
 	private expiresAt?: number;
+	private folderName?: string;
+	private rootFolderId?: string;
 
 	// Local cache mapping paths to Google Drive file IDs
 	private pathIdCache = new Map<string, string>();
 
 	constructor(options: GoogleDriveStorageOptions) {
 		this.clientId = options.clientId;
+		this.folderName = options.folderName;
 		if (options.credentials) {
 			this.setCredentials(options.credentials);
 		}
@@ -101,6 +108,59 @@ export class GoogleDriveStorage implements StorageBackend {
 	}
 
 	/**
+	 * Resolves the root folder ID, creating the custom folder if configured.
+	 */
+	private async getRootFolderId(): Promise<string> {
+		if (!this.folderName) {
+			return 'root';
+		}
+		if (this.rootFolderId) {
+			return this.rootFolderId;
+		}
+
+		const escapedName = this.folderName.replace(/'/g, "\\'");
+		const q = `name = '${escapedName}' and 'root' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`;
+		const url = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id)`;
+		const res = await fetch(url, {
+			headers: { Authorization: `Bearer ${this.accessToken}` }
+		});
+
+		if (!res.ok) {
+			const errBody = await res.text().catch(() => '');
+			throw new Error(`Failed to find root folder '${this.folderName}' (HTTP ${res.status}): ${res.statusText || ''} - ${errBody}`);
+		}
+
+		const data = await res.json();
+		const folder = data.files?.[0];
+
+		if (folder) {
+			this.rootFolderId = folder.id;
+			return this.rootFolderId!;
+		}
+
+		const createRes = await fetch('https://www.googleapis.com/drive/v3/files', {
+			method: 'POST',
+			headers: {
+				Authorization: `Bearer ${this.accessToken}`,
+				'Content-Type': 'application/json'
+			},
+			body: JSON.stringify({
+				name: this.folderName,
+				mimeType: 'application/vnd.google-apps.folder',
+				parents: ['root']
+			})
+		});
+
+		if (!createRes.ok) {
+			throw new Error(`Failed to create root folder '${this.folderName}': ${createRes.statusText}`);
+		}
+
+		const createData = await createRes.json();
+		this.rootFolderId = createData.id;
+		return this.rootFolderId!;
+	}
+
+	/**
 	 * Helper method to resolve an absolute path to a Google Drive file/folder ID.
 	 * Walks down the path hierarchy, query and caching resolved folder/file IDs.
 	 *
@@ -110,8 +170,10 @@ export class GoogleDriveStorage implements StorageBackend {
 	 */
 	private async resolvePath(path: string, createDirectories = false): Promise<string | null> {
 		const cleanPath = '/' + path.split('/').filter(Boolean).join('/');
+		const rootId = await this.getRootFolderId();
+
 		if (cleanPath === '/') {
-			return 'root';
+			return rootId;
 		}
 
 		if (this.pathIdCache.has(cleanPath)) {
@@ -119,7 +181,7 @@ export class GoogleDriveStorage implements StorageBackend {
 		}
 
 		const segments = cleanPath.split('/').filter(Boolean);
-		let currentId = 'root';
+		let currentId = rootId;
 		let currentPath = '';
 
 		for (const segment of segments) {
