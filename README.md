@@ -75,6 +75,45 @@ console.log(result.created, result.updated, result.deleted);
 
 ---
 
+## Testing
+
+The project has two test suites: unit tests using Node's native test runner and E2E integration tests running in a headless Chromium browser via Vitest and Playwright.
+
+### 1. Unit Tests (Mocked)
+Runs unit tests locally in Node using mocked remote storage environments:
+```bash
+npm run test
+```
+
+### 2. E2E Browser Integration Tests
+Runs tests inside native browser environments against real remote backends (e.g., Google Drive):
+```bash
+npm run test:browser
+```
+> [!NOTE]
+> E2E integration tests are skipped by default unless valid authentication credentials exist in your local `.env` file.
+
+#### Setting up Credentials for E2E Tests
+To run E2E tests against your real accounts:
+1. Start the local Svelte development server:
+   ```bash
+   npm run dev
+   ```
+2. Navigate to the tester pages in your browser:
+   - Google Drive: `http://localhost:5173/test/google-drive`
+   - Dropbox: `http://localhost:5173/test/dropbox`
+3. Enter your OAuth Client ID and click **Connect**. Complete the login flow.
+4. Once authenticated, the Svelte client UI automatically posts the resulting tokens and configurations to a development-only API endpoint, saving them to your local `.env` file.
+5. You can now close the server and run the E2E tests:
+   ```bash
+   npm run test:browser
+   ```
+
+#### Debug Logs
+When E2E tests are run, detailed logs outlining actions taken, zip archive uncompressed sizes, compressed sizes, and packed files are written to `debug.txt` at the root of the project directory.
+
+---
+
 ## Documentation
 
 For detailed configurations, see the following documentation:

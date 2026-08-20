@@ -289,13 +289,15 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 	}
 
 	/**
-	 * Appends local changes into the active remote chunk.
+	 * Sequentially writes dirty and deleted files across one or more chunks, performing
+	 * dynamic chunk rollovers when a chunk size limit is exceeded.
 	 */
-	private async appendToActiveChunk(
+	private async writeChangesToChunks(
 		context: StratusSyncContext,
 		metadata: any,
-		activeChunkPath: string,
-		activeChunk: ChunkMetadata,
+		initialChunkNum: number,
+		initialChunkPath: string,
+		initialChunk: ChunkMetadata,
 		remoteChunks: { path: string }[],
 		dirtyPaths: string[],
 		deletedPaths: string[],
@@ -304,130 +306,110 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 		deleted: string[]
 	): Promise<void> {
 		const localFiles = metadata.files;
-		const activeExists = remoteChunks.some((c) => c.path === activeChunkPath);
-		let filesMap = new Map<string, Uint8Array>();
+		
+		let currentChunkNum = initialChunkNum;
+		let currentChunkPath = initialChunkPath;
+		let currentChunk = { ...initialChunk };
+		
+		// Ensure internal structures are clean
+		currentChunk.files = { ...(currentChunk.files || {}) };
+		currentChunk.deleted = [...(currentChunk.deleted || [])];
 
+		let activeExists = remoteChunks.some((c) => c.path === currentChunkPath);
+		
+		let filesMap = new Map<string, Uint8Array>();
 		if (activeExists) {
-			const op = context.backend.readFile(activeChunkPath);
+			const op = context.backend.readFile(currentChunkPath);
 			const bytes = await op.finished;
 			filesMap = await this.decodeZip(bytes);
 		}
 
-		// Add/overwrite dirty files
-		await Promise.all(
-			dirtyPaths.map(async (path) => {
-				const content = await context.readLocalFile(path);
-				filesMap.set(path, content);
+		const cumulativeDeleted = new Set(currentChunk.deleted);
+		deletedPaths.forEach((path) => cumulativeDeleted.add(path));
 
-				const fileMeta = localFiles[path];
-				const isNew = !activeChunk.files[path];
-				if (isNew) {
-					created.push(path);
-				} else {
-					updated.push(path);
-				}
+		let hasUnwrittenChanges = false;
 
-				activeChunk.files[path] = {
-					size: content.length,
-					modifiedAt: fileMeta.localModifiedAt
+		await dirtyPaths.reduce(async (promise, path) => {
+			await promise;
+			const content = await context.readLocalFile(path);
+			const fileMeta = localFiles[path];
+
+			// If adding this file exceeds the threshold and we already have files in the current chunk, rollover
+			const currentSize = currentChunk.uncompressedSize;
+			if (currentSize + content.length > this.chunkSizeLimit && (filesMap.size > 0 || Object.keys(currentChunk.files).length > 0)) {
+				// 1. Write the current chunk to backend
+				currentChunk.deleted = Array.from(cumulativeDeleted);
+				currentChunk.uncompressedSize = Array.from(filesMap.entries())
+					.filter(([name]) => name !== '.metadata.json')
+					.reduce((acc, [, bytes]) => acc + bytes.length, 0);
+				await this.writeChunk(context, currentChunkPath, filesMap, currentChunk);
+				metadata.chunks[currentChunkPath] = { ...currentChunk };
+
+				// 2. Rollover to new chunk
+				currentChunkNum++;
+				currentChunkPath = this.formatChunkPath(currentChunkNum);
+				currentChunk = {
+					uncompressedSize: 0,
+					files: {},
+					deleted: Array.from(cumulativeDeleted)
 				};
+				filesMap = new Map<string, Uint8Array>();
+				activeExists = false;
+				hasUnwrittenChanges = false;
+			}
 
-				localFiles[path] = {
-					...fileMeta,
-					status: 'clean',
-					remoteModifiedAt: Date.now()
-				};
-			})
-		);
+			// Add/overwrite file in the current chunk
+			filesMap.set(path, content);
+			
+			const isNew = !currentChunk.files[path];
+			if (isNew) {
+				created.push(path);
+			} else {
+				updated.push(path);
+			}
 
-		// Remove deleted files
+			currentChunk.files[path] = {
+				size: content.length,
+				modifiedAt: fileMeta.localModifiedAt
+			};
+
+			localFiles[path] = {
+				...fileMeta,
+				status: 'clean',
+				remoteModifiedAt: Date.now()
+			};
+
+			cumulativeDeleted.delete(path);
+			currentChunk.deleted = Array.from(cumulativeDeleted);
+			
+			currentChunk.uncompressedSize = Array.from(filesMap.entries())
+				.filter(([name]) => name !== '.metadata.json')
+				.reduce((acc, [, bytes]) => acc + bytes.length, 0);
+				
+			hasUnwrittenChanges = true;
+		}, Promise.resolve());
+
+		// Process deleted paths
 		deletedPaths.forEach((path) => {
 			filesMap.delete(path);
-			if (activeChunk.files[path]) {
-				delete activeChunk.files[path];
+			if (currentChunk.files[path]) {
+				delete currentChunk.files[path];
 			}
 			deleted.push(path);
 			delete localFiles[path];
+			hasUnwrittenChanges = true;
 		});
 
-		// Update cumulative deleted list
-		const currentDeleted = new Set(activeChunk.deleted ?? []);
-		deletedPaths.forEach((path) => currentDeleted.add(path));
-		dirtyPaths.forEach((path) => currentDeleted.delete(path));
-		activeChunk.deleted = Array.from(currentDeleted);
-
-		// Recalculate uncompressedSize
-		activeChunk.uncompressedSize = Array.from(filesMap.entries())
-			.filter(([name]) => name !== '.metadata.json')
-			.reduce((acc, [, content]) => acc + content.length, 0);
-
-		await this.writeChunk(context, activeChunkPath, filesMap, activeChunk);
-	}
-
-	/**
-	 * Creates a new remote chunk for overflow local changes (rollover).
-	 */
-	private async rolloverToNewChunk(
-		context: StratusSyncContext,
-		metadata: any,
-		activeChunkNum: number,
-		activeChunk: ChunkMetadata,
-		dirtyPaths: string[],
-		deletedPaths: string[],
-		created: string[],
-		deleted: string[]
-	): Promise<void> {
-		const localFiles = metadata.files;
-		const nextChunkNum = activeChunkNum + 1;
-		const nextChunkPath = this.formatChunkPath(nextChunkNum);
-
-		const newFilesMap = new Map<string, Uint8Array>();
-		const nextChunk: ChunkMetadata = {
-			uncompressedSize: 0,
-			files: {},
-			deleted: []
-		};
-
-		const currentDeleted = new Set(activeChunk.deleted ?? []);
-		deletedPaths.forEach((path) => currentDeleted.add(path));
-		dirtyPaths.forEach((path) => currentDeleted.delete(path));
-		nextChunk.deleted = Array.from(currentDeleted);
-
-		// Add dirty files to new chunk
-		await Promise.all(
-			dirtyPaths.map(async (path) => {
-				const content = await context.readLocalFile(path);
-				newFilesMap.set(path, content);
-
-				const fileMeta = localFiles[path];
-				created.push(path);
-
-				nextChunk.files[path] = {
-					size: content.length,
-					modifiedAt: fileMeta.localModifiedAt
-				};
-
-				localFiles[path] = {
-					...fileMeta,
-					status: 'clean',
-					remoteModifiedAt: Date.now()
-				};
-			})
-		);
-
-		// Remove local deleted files
-		deletedPaths.forEach((path) => {
-			deleted.push(path);
-			delete localFiles[path];
-		});
-
-		// Recalculate size
-		nextChunk.uncompressedSize = Array.from(newFilesMap.entries())
-			.filter(([name]) => name !== '.metadata.json')
-			.reduce((acc, [, content]) => acc + content.length, 0);
-
-		await this.writeChunk(context, nextChunkPath, newFilesMap, nextChunk);
-		metadata.chunks[nextChunkPath] = nextChunk;
+		// Finalize and write the last active chunk
+		if (hasUnwrittenChanges || !activeExists) {
+			currentChunk.deleted = Array.from(cumulativeDeleted);
+			currentChunk.uncompressedSize = Array.from(filesMap.entries())
+				.filter(([name]) => name !== '.metadata.json')
+				.reduce((acc, [, bytes]) => acc + bytes.length, 0);
+			
+			await this.writeChunk(context, currentChunkPath, filesMap, currentChunk);
+			metadata.chunks[currentChunkPath] = currentChunk;
+		}
 	}
 
 	async sync(context: StratusSyncContext): Promise<SyncResult> {
@@ -503,40 +485,19 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 		);
 
 		if (dirtyPaths.length > 0 || deletedPaths.length > 0) {
-			const newChangesSize = await Promise.all(
-				dirtyPaths.map(async (path) => {
-					const content = await context.readLocalFile(path);
-					return content.length;
-				})
-			).then((sizes) => sizes.reduce((acc, s) => acc + s, 0));
-
-			const activeChunkSize = activeChunk.uncompressedSize;
-
-			if (activeChunkSize + newChangesSize <= this.chunkSizeLimit) {
-				await this.appendToActiveChunk(
-					context,
-					metadata,
-					activeChunkPath,
-					activeChunk,
-					remoteChunks,
-					dirtyPaths,
-					deletedPaths,
-					created,
-					updated,
-					deleted
-				);
-			} else {
-				await this.rolloverToNewChunk(
-					context,
-					metadata,
-					activeChunkNum,
-					activeChunk,
-					dirtyPaths,
-					deletedPaths,
-					created,
-					deleted
-				);
-			}
+			await this.writeChangesToChunks(
+				context,
+				metadata,
+				activeChunkNum,
+				activeChunkPath,
+				activeChunk,
+				remoteChunks,
+				dirtyPaths,
+				deletedPaths,
+				created,
+				updated,
+				deleted
+			);
 		}
 
 		await context.saveLocalMetadata(metadata);

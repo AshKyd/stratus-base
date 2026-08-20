@@ -23,3 +23,9 @@ Thumbs.db
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 scratch
+
+# E2E Test Artifacts & Screenshots
+.vitest-attachments/
+src/lib/__screenshots__/
+debug.txt
+task.md

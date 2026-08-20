@@ -53,6 +53,22 @@
 		return window.location.origin + window.location.pathname;
 	}
 
+	async function saveCredentialsToServer(credentials: any = null, config: any = null) {
+		try {
+			await fetch('/api/save-credentials', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({
+					backendId: backend.id,
+					credentials: credentials || (backend.getCredentials ? backend.getCredentials() : {}),
+					config: config || configValues
+				})
+			});
+		} catch (e) {
+			console.error('Failed to save credentials to server:', e);
+		}
+	}
+
 	function showMsg(text: string, type: 'info' | 'error' | 'success' = 'info') {
 		message = text;
 		messageType = type;
@@ -80,7 +96,9 @@
 		// Check if credentials are saved
 		const savedCreds = localStorage.getItem(`tester_creds_${backend.id}`);
 		if (savedCreds && backend.setCredentials) {
-			backend.setCredentials(JSON.parse(savedCreds));
+			const credentials = JSON.parse(savedCreds);
+			backend.setCredentials(credentials);
+			await saveCredentialsToServer(credentials);
 		}
 
 		isConfigured = await backend.isConfigured();
@@ -99,6 +117,7 @@
 				isConfigured = true;
 				showMsg('Authenticated successfully!', 'success');
 				window.history.replaceState({}, '', window.location.pathname);
+				await saveCredentialsToServer(credentials);
 			} catch (err: any) {
 				showMsg(`Authentication failed: ${err.message || err}`, 'error');
 			}
@@ -116,6 +135,7 @@
 				isConfigured = true;
 				showMsg('Authenticated successfully!', 'success');
 				window.history.replaceState({}, '', window.location.pathname);
+				await saveCredentialsToServer(credentials);
 			} catch (err: any) {
 				showMsg(`Authentication failed: ${err.message || err}`, 'error');
 			}
@@ -131,6 +151,8 @@
 		Object.entries(configValues).forEach(([key, value]) => {
 			localStorage.setItem(`tester_config_${backend.id}_${key}`, value);
 		});
+
+		await saveCredentialsToServer(null, configValues);
 
 		if (onConfigure) {
 			try {
