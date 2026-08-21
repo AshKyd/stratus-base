@@ -9,12 +9,7 @@ import type {
 	ChunkMetadata
 } from '../../StratusBase.ts';
 import { SyncConflictError } from '../../StratusBase.ts';
-import {
-	ZipReader,
-	ZipWriter,
-	Uint8ArrayReader,
-	Uint8ArrayWriter
-} from '@zip.js/zip.js';
+import { SevenZipWriter, SevenZipReader } from '../../utils/codec7z.ts';
 
 export interface MiddlewareZipChunkOptions {
 	chunkSizeLimit?: number; // Target chunk size limit, default 5MB
@@ -41,13 +36,13 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 	}
 
 	/**
-	 * Lists all remote chunks matching archive_chunk_*.zip, sorted numerically.
+	 * Lists all remote chunks matching archive_chunk_*.7z, sorted numerically.
 	 */
 	private async listRemoteChunks(
 		backend: StorageBackend
 	): Promise<{ path: string; num: number; size: number; modifiedAt: Date }[]> {
 		const files = await backend.listDirectory('/');
-		const chunkRegex = /^archive_chunk_(\d+)\.zip$/;
+		const chunkRegex = /^archive_chunk_(\d+)\.7z$/;
 		return files
 			.filter((f) => f.type === 'file' && chunkRegex.test(f.name))
 			.map((f) => {
@@ -63,11 +58,11 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 	}
 
 	/**
-	 * Formats a chunk number as archive_chunk_XXX.zip.
+	 * Formats a chunk number as archive_chunk_XXX.7z.
 	 */
 	private formatChunkPath(num: number): string {
 		const padded = String(num).padStart(3, '0');
-		return `/archive_chunk_${padded}.zip`;
+		return `/archive_chunk_${padded}.7z`;
 	}
 
 	/**
@@ -83,44 +78,34 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 	}
 
 	/**
-	 * Decodes zip bytes into a file content map.
+	 * Decodes 7z bytes into a file content map.
 	 */
 	private async decodeZip(zipBytes: Uint8Array): Promise<Map<string, Uint8Array>> {
 		const filesMap = new Map<string, Uint8Array>();
 		if (zipBytes.length === 0) {
 			return filesMap;
 		}
-		const reader = new ZipReader(new Uint8ArrayReader(zipBytes), { password: this.password });
-		const entries = await reader.getEntries();
-		await entries.reduce(async (promise, entry) => {
-			await promise;
-			if (entry.directory) return;
-			const content = await entry.getData(new Uint8ArrayWriter());
-			const filename = entry.filename === '.metadata.json'
+		const reader = new SevenZipReader(this.password);
+		await reader.appendChunk(zipBytes);
+		for await (const entry of reader.extract()) {
+			const filename = entry.path === '.metadata.json'
 				? '.metadata.json'
-				: (entry.filename.startsWith('/') ? entry.filename : '/' + entry.filename);
-			filesMap.set(filename, content);
-		}, Promise.resolve());
-		await reader.close();
+				: (entry.path.startsWith('/') ? entry.path : '/' + entry.path);
+			filesMap.set(filename, entry.data);
+		}
 		return filesMap;
 	}
 
 	/**
-	 * Encodes a file content map into a zip Uint8Array.
+	 * Encodes a file content map into a 7z Uint8Array.
 	 */
 	private async encodeZip(filesMap: Map<string, Uint8Array>): Promise<Uint8Array> {
-		const writer = new Uint8ArrayWriter();
-		const zipWriter = new ZipWriter(writer);
-		await Array.from(filesMap.entries()).reduce(async (promise, [filename, content]) => {
-			await promise;
+		const writer = new SevenZipWriter(this.password);
+		for (const [filename, content] of filesMap.entries()) {
 			const entryName = filename.startsWith('/') ? filename.slice(1) : filename;
-			await zipWriter.add(entryName, new Uint8ArrayReader(content), {
-				password: this.password,
-				encryptionStrength: 3
-			});
-		}, Promise.resolve());
-		await zipWriter.close();
-		return await writer.getData();
+			await writer.write({ path: entryName, data: content });
+		}
+		return await writer.finalize();
 	}
 
 	/**
@@ -334,15 +319,15 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 			const content = await context.readLocalFile(path);
 			const fileMeta = localFiles[path];
 
-			// If adding this file exceeds the threshold and we already have files in the current chunk, rollover
+			// If adding this file meets or exceeds the threshold and we already have files in the current chunk, rollover
 			const currentSize = currentChunk.uncompressedSize;
-			if (currentSize + content.length > this.chunkSizeLimit && (filesMap.size > 0 || Object.keys(currentChunk.files).length > 0)) {
+			if (currentSize + content.length >= this.chunkSizeLimit && (filesMap.size > 0 || Object.keys(currentChunk.files).length > 0)) {
 				// 1. Write the current chunk to backend
 				currentChunk.deleted = Array.from(cumulativeDeleted);
 				currentChunk.uncompressedSize = Array.from(filesMap.entries())
 					.filter(([name]) => name !== '.metadata.json')
 					.reduce((acc, [, bytes]) => acc + bytes.length, 0);
-				const tempPath = `/temp_sync_archive_chunk_${String(currentChunkNum).padStart(3, '0')}.zip`;
+				const tempPath = `/temp_sync_archive_chunk_${String(currentChunkNum).padStart(3, '0')}.7z`;
 				await this.writeChunk(context, tempPath, filesMap, currentChunk);
 				await context.backend.renameFile(tempPath, currentChunkPath);
 				metadata.chunks[currentChunkPath] = { ...currentChunk };
@@ -409,7 +394,7 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 				.filter(([name]) => name !== '.metadata.json')
 				.reduce((acc, [, bytes]) => acc + bytes.length, 0);
 			
-			const tempPath = `/temp_sync_archive_chunk_${String(currentChunkNum).padStart(3, '0')}.zip`;
+			const tempPath = `/temp_sync_archive_chunk_${String(currentChunkNum).padStart(3, '0')}.7z`;
 			await this.writeChunk(context, tempPath, filesMap, currentChunk);
 			await context.backend.renameFile(tempPath, currentChunkPath);
 			metadata.chunks[currentChunkPath] = currentChunk;
@@ -535,7 +520,7 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 		const tempChunks: { path: string; meta: ChunkMetadata }[] = [];
 
 		let currentTempChunkNum = 1;
-		let currentTempChunkPath = `/temp_archive_chunk_${String(currentTempChunkNum).padStart(3, '0')}.zip`;
+		let currentTempChunkPath = `/temp_archive_chunk_${String(currentTempChunkNum).padStart(3, '0')}.7z`;
 
 		let currentFilesMap = new Map<string, Uint8Array>();
 		let currentChunkMeta: ChunkMetadata = {
@@ -551,7 +536,7 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 			const fileMeta = localFiles[path];
 
 			// If adding this file exceeds the threshold and we already have files in the current chunk, close it and start a new one
-			if (currentChunkMeta.uncompressedSize + content.length > this.chunkSizeLimit && currentFilesMap.size > 0) {
+			if (currentChunkMeta.uncompressedSize + content.length >= this.chunkSizeLimit && currentFilesMap.size > 0) {
 				// Serialize metadata and write the current temp chunk
 				currentChunkMeta.uncompressedSize = Array.from(currentFilesMap.entries())
 					.filter(([name]) => name !== '.metadata.json')
@@ -566,7 +551,7 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 
 				// Start next temp chunk
 				currentTempChunkNum++;
-				currentTempChunkPath = `/temp_archive_chunk_${String(currentTempChunkNum).padStart(3, '0')}.zip`;
+				currentTempChunkPath = `/temp_archive_chunk_${String(currentTempChunkNum).padStart(3, '0')}.7z`;
 				currentFilesMap = new Map<string, Uint8Array>();
 				currentChunkMeta = {
 					uncompressedSize: 0,
@@ -598,14 +583,14 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 			});
 		}
 
-		// 4. Delete all old remote chunks archive_chunk_*.zip
+		// 4. Delete all old remote chunks archive_chunk_*.7z
 		const oldRemoteChunks = await this.listRemoteChunks(context.backend);
 		await oldRemoteChunks.reduce(async (promise, chunk) => {
 			await promise;
 			await context.backend.deleteFile(chunk.path);
 		}, Promise.resolve());
 
-		// 5. Rename temp chunks to final names archive_chunk_*.zip
+		// 5. Rename temp chunks to final names archive_chunk_*.7z
 		const newChunksCache: Record<string, ChunkMetadata> = {};
 		await tempChunks.reduce(async (promise, chunk, index) => {
 			await promise;

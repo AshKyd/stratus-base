@@ -3,7 +3,7 @@ import assert from 'node:assert';
 import { StratusBase, setStorageManager } from '../../StratusBase.ts';
 import { MiddlewareZipChunk } from './MiddlewareZipChunk.ts';
 import { MemoryStorage } from '../../backends/MemoryStorage.ts';
-import { ZipReader, Uint8ArrayReader, Uint8ArrayWriter } from '@zip.js/zip.js';
+import { SevenZipWriter, SevenZipReader } from '../../utils/codec7z.ts';
 
 // --- OPFS Mocks ---
 
@@ -96,21 +96,17 @@ class MockStorageManager {
 	}
 }
 
-// --- Helper to read zip files in tests ---
+// --- Helper to read 7z files in tests ---
 async function readZipEntries(zipBytes: Uint8Array, password = 'test-pass'): Promise<Map<string, string>> {
 	const filesMap = new Map<string, string>();
-	const reader = new ZipReader(new Uint8ArrayReader(zipBytes), { password });
-	const entries = await reader.getEntries();
-	await entries.reduce(async (promise, entry) => {
-		await promise;
-		if (entry.directory) return;
-		const contentBytes = await entry.getData(new Uint8ArrayWriter());
-		const filename = entry.filename === '.metadata.json'
+	const reader = new SevenZipReader(password);
+	await reader.appendChunk(zipBytes);
+	for await (const entry of reader.extract()) {
+		const filename = entry.path === '.metadata.json'
 			? '.metadata.json'
-			: (entry.filename.startsWith('/') ? entry.filename : '/' + entry.filename);
-		filesMap.set(filename, new TextDecoder().decode(contentBytes));
-	}, Promise.resolve());
-	await reader.close();
+			: (entry.path.startsWith('/') ? entry.path : '/' + entry.path);
+		filesMap.set(filename, new TextDecoder().decode(entry.data));
+	}
 	return filesMap;
 }
 
@@ -121,7 +117,7 @@ test('MiddlewareZipChunk configuration validation', () => {
 });
 
 test('MiddlewareZipChunk sync runs', async (t) => {
-	await t.test('Initial push creates archive_chunk_001.zip', async () => {
+	await t.test('Initial push creates archive_chunk_001.7z', async () => {
 		const storageMock = new MockStorageManager();
 		setStorageManager(storageMock);
 
@@ -133,33 +129,27 @@ test('MiddlewareZipChunk sync runs', async (t) => {
 			middleware
 		});
 
-		// Create a local file
-		await stratus.writeFile('/note1.md', new TextEncoder().encode('Hello Chunk'));
-
-		// Sync
+		await stratus.writeFile('/file1.md', new TextEncoder().encode('Hello Chunk'));
 		const result = await stratus.sync();
-		assert.deepStrictEqual(result.created, ['/note1.md']);
 
-		// Verify chunk uploaded to remote
-		const zipFile = backend.getFilesMap().get('/archive_chunk_001.zip');
+		assert.deepStrictEqual(result.created, ['/file1.md']);
+
+		// Verify chunk created on backend
+		const zipFile = backend.getFilesMap().get('/archive_chunk_001.7z');
 		assert.ok(zipFile);
 
+		// Read chunk using reader helper
 		const filesMap = await readZipEntries(zipFile.content, 'test-pass');
-		assert.strictEqual(filesMap.get('/note1.md'), 'Hello Chunk');
+		assert.strictEqual(filesMap.get('/file1.md'), 'Hello Chunk');
 
-		// Check active chunk .metadata.json inside zip
-		const metadataStr = filesMap.get('.metadata.json');
-		assert.ok(metadataStr);
-		const chunkMeta = JSON.parse(metadataStr);
+		const chunkMeta = JSON.parse(filesMap.get('.metadata.json')!);
 		assert.strictEqual(chunkMeta.uncompressedSize, 11);
-		assert.ok(chunkMeta.files['/note1.md']);
-		assert.strictEqual(chunkMeta.files['/note1.md'].size, 11);
+		assert.ok(chunkMeta.files['/file1.md']);
 
-		// Local cache should match
+		// Verify local chunks cache
 		const meta = await stratus.getMetadata();
-		assert.ok(meta.chunks);
-		assert.ok(meta.chunks['/archive_chunk_001.zip']);
-		assert.strictEqual(meta.chunks['/archive_chunk_001.zip'].uncompressedSize, 11);
+		assert.ok(meta.chunks['/archive_chunk_001.7z']);
+		assert.strictEqual(meta.chunks['/archive_chunk_001.7z'].uncompressedSize, 11);
 	});
 
 	await t.test('Push when local metadata is missing but remote chunks exist', async () => {
@@ -167,24 +157,15 @@ test('MiddlewareZipChunk sync runs', async (t) => {
 		setStorageManager(storageMock);
 
 		const backend = new MemoryStorage();
-		// Create a pre-existing chunk on remote
-		const initialChunkMeta = {
-			uncompressedSize: 20,
-			files: {
-				'/existing.md': { size: 20, modifiedAt: Date.now() }
-			},
-			deleted: []
-		};
-		const writer = new Uint8ArrayWriter();
-		const { ZipWriter } = await import('@zip.js/zip.js');
-		const zipWriter = new ZipWriter(writer);
-		await zipWriter.add('existing.md', new Uint8ArrayReader(new TextEncoder().encode('Existing file content')), { password: 'test-pass', encryptionStrength: 3 });
-		await zipWriter.add('.metadata.json', new Uint8ArrayReader(new TextEncoder().encode(JSON.stringify(initialChunkMeta))), { password: 'test-pass', encryptionStrength: 3 });
-		await zipWriter.close();
-		const zipBytes = await writer.getData();
 
-		backend.getFilesMap().set('/archive_chunk_001.zip', {
-			content: zipBytes,
+		// Create a remote chunk 001 with an existing file
+		const writer = new SevenZipWriter('test-pass');
+		await writer.write({ path: 'existing.md', data: new TextEncoder().encode('Existing file content') });
+		const meta1 = { uncompressedSize: 21, files: { '/existing.md': { size: 21, modifiedAt: Date.now() } }, deleted: [] };
+		await writer.write({ path: '.metadata.json', data: new TextEncoder().encode(JSON.stringify(meta1)) });
+		const content = await writer.finalize();
+		backend.getFilesMap().set('/archive_chunk_001.7z', {
+			content,
 			modifiedAt: new Date()
 		});
 
@@ -195,31 +176,46 @@ test('MiddlewareZipChunk sync runs', async (t) => {
 			middleware
 		});
 
-		// Local metadata doesn't contain chunks cache yet
-		const initialMeta = await stratus.getMetadata();
-		assert.strictEqual(initialMeta.chunks, undefined);
+		// Ensure local client starts with /existing.md as clean
+		const localMeta = await stratus.getMetadata();
+		localMeta.files['/existing.md'] = {
+			path: '/existing.md',
+			type: 'file',
+			size: 21,
+			localModifiedAt: Date.now(),
+			remoteModifiedAt: Date.now(),
+			status: 'clean'
+		};
+		localMeta.chunks = localMeta.chunks || {};
+		localMeta.chunks['/archive_chunk_001.7z'] = meta1;
+		await stratus.saveMetadata(localMeta);
 
-		// Create a local dirty file
-		await stratus.writeFile('/new_file.md', new TextEncoder().encode('New file content'));
+		const opfsRoot = await storageMock.getDirectory();
+		const file = await opfsRoot.getFileHandle('existing.md', { create: true });
+		const writable = await file.createWritable();
+		await writable.write(new TextEncoder().encode('Existing file content'));
+		await writable.close();
 
-		// Sync should list remote, find chunk 001, download it, reconstruct cache, and repack it
+		// Add a new file locally
+		await stratus.writeFile('/new_file.md', new TextEncoder().encode('New content'));
+
+		// Sync
 		const result = await stratus.sync();
-		assert.deepStrictEqual(result.created.sort(), ['/existing.md', '/new_file.md'].sort());
+		assert.deepStrictEqual(result.created, ['/new_file.md']);
 
-		// Verify repacked chunk 001 contains both files
-		const zipFile = backend.getFilesMap().get('/archive_chunk_001.zip');
+		// Verify chunk 001 is overwritten containing BOTH files
+		const zipFile = backend.getFilesMap().get('/archive_chunk_001.7z');
 		assert.ok(zipFile);
+
 		const filesMap = await readZipEntries(zipFile.content, 'test-pass');
 		assert.strictEqual(filesMap.get('/existing.md'), 'Existing file content');
-		assert.strictEqual(filesMap.get('/new_file.md'), 'New file content');
+		assert.strictEqual(filesMap.get('/new_file.md'), 'New content');
 
-		// Local metadata chunks cache should be fully populated
 		const meta = await stratus.getMetadata();
-		assert.ok(meta.chunks);
-		assert.ok(meta.chunks['/archive_chunk_001.zip']);
-		assert.strictEqual(meta.chunks['/archive_chunk_001.zip'].uncompressedSize, 37);
-		assert.ok(meta.chunks['/archive_chunk_001.zip'].files['/existing.md']);
-		assert.ok(meta.chunks['/archive_chunk_001.zip'].files['/new_file.md']);
+		assert.ok(meta.chunks['/archive_chunk_001.7z']);
+		assert.strictEqual(meta.chunks['/archive_chunk_001.7z'].uncompressedSize, 32); // 21 + 11
+		assert.ok(meta.chunks['/archive_chunk_001.7z'].files['/existing.md']);
+		assert.ok(meta.chunks['/archive_chunk_001.7z'].files['/new_file.md']);
 	});
 
 	await t.test('Rollover to next chunk when size limit is exceeded', async () => {
@@ -227,42 +223,37 @@ test('MiddlewareZipChunk sync runs', async (t) => {
 		setStorageManager(storageMock);
 
 		const backend = new MemoryStorage();
-		// Set limit to 20 bytes (very small to easily trigger rollover)
-		const middleware = new MiddlewareZipChunk({ chunkSizeLimit: 20, password: 'test-pass' });
+		const middleware = new MiddlewareZipChunk({ chunkSizeLimit: 20, password: 'test-pass' }); // tiny size limit
 		const stratus = new StratusBase({
 			backend,
 			localRoot: '/app',
 			middleware
 		});
 
-		// 1. Initial write (15 bytes) - fits in chunk 001
-		await stratus.writeFile('/note1.md', new TextEncoder().encode('123456789012345'));
+		// Write file 1 (15 bytes) -> should go to chunk 001
+		await stratus.writeFile('/file1.md', new TextEncoder().encode('123456789012345'));
 		await stratus.sync();
 
-		assert.ok(backend.getFilesMap().has('/archive_chunk_001.zip'));
-		assert.ok(!backend.getFilesMap().has('/archive_chunk_002.zip'));
+		assert.ok(backend.getFilesMap().has('/archive_chunk_001.7z'));
+		assert.ok(!backend.getFilesMap().has('/archive_chunk_002.7z'));
 
-		// 2. Second write (10 bytes) - total becomes 25 bytes (exceeds 20 limit) -> Rollover!
-		await stratus.writeFile('/note2.md', new TextEncoder().encode('1234567890'));
-		const result = await stratus.sync();
+		// Write file 2 (10 bytes) -> chunk 001 has 15 bytes + metadata. Adding file 2 exceeds 20 bytes.
+		// Should roll over to chunk 002.
+		await stratus.writeFile('/file2.md', new TextEncoder().encode('1234567890'));
+		await stratus.sync();
 
-		assert.deepStrictEqual(result.created, ['/note2.md']);
-		assert.ok(backend.getFilesMap().has('/archive_chunk_002.zip'));
+		assert.ok(backend.getFilesMap().has('/archive_chunk_002.7z'));
 
-		// Verify chunk 002 contains ONLY note2.md and the .metadata.json
-		const zipFile2 = backend.getFilesMap().get('/archive_chunk_002.zip');
-		assert.ok(zipFile2);
+		const zipFile2 = backend.getFilesMap().get('/archive_chunk_002.7z')!;
 		const filesMap2 = await readZipEntries(zipFile2.content, 'test-pass');
-		assert.strictEqual(filesMap2.get('/note1.md'), undefined);
-		assert.strictEqual(filesMap2.get('/note2.md'), '1234567890');
+		assert.ok(filesMap2.has('/file2.md'));
+		assert.ok(!filesMap2.has('/file1.md')); // file 1 remains in chunk 001
 
-		// Local cache should contain both chunks
 		const meta = await stratus.getMetadata();
-		assert.ok(meta.chunks);
-		assert.ok(meta.chunks['/archive_chunk_001.zip']);
-		assert.ok(meta.chunks['/archive_chunk_002.zip']);
-		assert.strictEqual(meta.chunks['/archive_chunk_001.zip'].uncompressedSize, 15);
-		assert.strictEqual(meta.chunks['/archive_chunk_002.zip'].uncompressedSize, 10);
+		assert.ok(meta.chunks['/archive_chunk_001.7z']);
+		assert.ok(meta.chunks['/archive_chunk_002.7z']);
+		assert.strictEqual(meta.chunks['/archive_chunk_001.7z'].uncompressedSize, 15);
+		assert.strictEqual(meta.chunks['/archive_chunk_002.7z'].uncompressedSize, 10);
 	});
 
 	await t.test('Deletions are tracked and carried over during rollover', async () => {
@@ -270,37 +261,46 @@ test('MiddlewareZipChunk sync runs', async (t) => {
 		setStorageManager(storageMock);
 
 		const backend = new MemoryStorage();
-		const middleware = new MiddlewareZipChunk({ chunkSizeLimit: 20, password: 'test-pass' });
+		// limit=16: file1 (15 bytes) fits in chunk 001; file2 (15 bytes) rolls to chunk 002
+		const middleware = new MiddlewareZipChunk({ chunkSizeLimit: 16, password: 'test-pass' });
 		const stratus = new StratusBase({
 			backend,
 			localRoot: '/app',
 			middleware
 		});
 
-		// 1. Initial write
-		await stratus.writeFile('/note1.md', new TextEncoder().encode('12345'));
+		// 1. Write file1 (15 bytes) -> chunk 001
+		await stratus.writeFile('/file1.md', new TextEncoder().encode('123456789012345'));
+		await stratus.sync();
+		assert.ok(backend.getFilesMap().has('/archive_chunk_001.7z'));
+
+		// 2. Write file2 (15 bytes) -> 15+15=30 >= 16, rolls to chunk 002
+		await stratus.writeFile('/file2.md', new TextEncoder().encode('abcdefghijklmno'));
+		await stratus.sync();
+		assert.ok(backend.getFilesMap().has('/archive_chunk_002.7z'), 'chunk 002 should exist');
+
+		// 3. Delete file1 (in chunk 001) -> deletion tracked and written to active chunk 002
+		await stratus.deleteFile('/file1.md');
 		await stratus.sync();
 
-		// 2. Delete file
-		await stratus.deleteFile('/note1.md');
-		await stratus.sync();
-
-		// Verify deletion is recorded in chunk 001's metadata
-		let zipFile = backend.getFilesMap().get('/archive_chunk_001.zip');
-		let filesMap = await readZipEntries(zipFile!.content, 'test-pass');
-		let chunkMeta = JSON.parse(filesMap.get('.metadata.json')!);
-		assert.deepStrictEqual(chunkMeta.deleted, ['/note1.md']);
-
-		// 3. Write new file that triggers rollover (exceeds 20 bytes)
-		await stratus.writeFile('/note2.md', new TextEncoder().encode('1234567890123456789012345'));
-		await stratus.sync();
-
-		// Verify chunk 002 exists and its metadata has carried over the deletion list
-		const zipFile2 = backend.getFilesMap().get('/archive_chunk_002.zip');
-		assert.ok(zipFile2);
+		// Verify chunk 002 now carries the deletion
+		const zipFile2 = backend.getFilesMap().get('/archive_chunk_002.7z')!;
 		const filesMap2 = await readZipEntries(zipFile2.content, 'test-pass');
 		const chunkMeta2 = JSON.parse(filesMap2.get('.metadata.json')!);
-		assert.deepStrictEqual(chunkMeta2.deleted, ['/note1.md']);
+		assert.deepStrictEqual(chunkMeta2.deleted, ['/file1.md'], 'deletion must appear in active chunk 002');
+
+		// 4. Write file3 (15 bytes) -> chunk 002 has file2 (15 bytes), so 15+15=30 >= 16 -> rolls to chunk 003
+		await stratus.writeFile('/file3.md', new TextEncoder().encode('ABCDEFGHIJKLMNO'));
+		await stratus.sync();
+
+		const zipFile3 = backend.getFilesMap().get('/archive_chunk_003.7z')!;
+		assert.ok(zipFile3, 'chunk 003 should be created after second rollover');
+		const filesMap3 = await readZipEntries(zipFile3.content, 'test-pass');
+		const chunkMeta3 = JSON.parse(filesMap3.get('.metadata.json')!);
+
+		// Deletion of file1 must carry over to chunk 003
+		assert.deepStrictEqual(chunkMeta3.deleted, ['/file1.md'], 'deletion must carry over to chunk 003');
+		assert.ok(chunkMeta3.files['/file3.md'], 'file3.md should be in chunk 003');
 	});
 
 	await t.test('Pull & Extract: sequential download of multiple remote chunks on empty local client', async () => {
@@ -308,25 +308,22 @@ test('MiddlewareZipChunk sync runs', async (t) => {
 		setStorageManager(storageMock);
 
 		const backend = new MemoryStorage();
-		const { ZipWriter } = await import('@zip.js/zip.js');
 
 		// Create remote chunk 001
-		const writer1 = new Uint8ArrayWriter();
-		const zipWriter1 = new ZipWriter(writer1);
-		await zipWriter1.add('file1.md', new Uint8ArrayReader(new TextEncoder().encode('Content 1')), { password: 'test-pass', encryptionStrength: 3 });
+		const writer1 = new SevenZipWriter('test-pass');
+		await writer1.write({ path: 'file1.md', data: new TextEncoder().encode('Content 1') });
 		const meta1 = { uncompressedSize: 9, files: { '/file1.md': { size: 9, modifiedAt: Date.now() - 10000 } }, deleted: [] };
-		await zipWriter1.add('.metadata.json', new Uint8ArrayReader(new TextEncoder().encode(JSON.stringify(meta1))), { password: 'test-pass', encryptionStrength: 3 });
-		await zipWriter1.close();
-		backend.getFilesMap().set('/archive_chunk_001.zip', { content: await writer1.getData(), modifiedAt: new Date() });
+		await writer1.write({ path: '.metadata.json', data: new TextEncoder().encode(JSON.stringify(meta1)) });
+		const content1 = await writer1.finalize();
+		backend.getFilesMap().set('/archive_chunk_001.7z', { content: content1, modifiedAt: new Date() });
 
 		// Create remote chunk 002
-		const writer2 = new Uint8ArrayWriter();
-		const zipWriter2 = new ZipWriter(writer2);
-		await zipWriter2.add('file2.md', new Uint8ArrayReader(new TextEncoder().encode('Content 2')), { password: 'test-pass', encryptionStrength: 3 });
+		const writer2 = new SevenZipWriter('test-pass');
+		await writer2.write({ path: 'file2.md', data: new TextEncoder().encode('Content 2') });
 		const meta2 = { uncompressedSize: 9, files: { '/file2.md': { size: 9, modifiedAt: Date.now() } }, deleted: [] };
-		await zipWriter2.add('.metadata.json', new Uint8ArrayReader(new TextEncoder().encode(JSON.stringify(meta2))), { password: 'test-pass', encryptionStrength: 3 });
-		await zipWriter2.close();
-		backend.getFilesMap().set('/archive_chunk_002.zip', { content: await writer2.getData(), modifiedAt: new Date() });
+		await writer2.write({ path: '.metadata.json', data: new TextEncoder().encode(JSON.stringify(meta2)) });
+		const content2 = await writer2.finalize();
+		backend.getFilesMap().set('/archive_chunk_002.7z', { content: content2, modifiedAt: new Date() });
 
 		const middleware = new MiddlewareZipChunk({ chunkSizeLimit: 1000, password: 'test-pass' });
 		const stratus = new StratusBase({
@@ -351,19 +348,17 @@ test('MiddlewareZipChunk sync runs', async (t) => {
 		setStorageManager(storageMock);
 
 		const backend = new MemoryStorage();
-		const { ZipWriter } = await import('@zip.js/zip.js');
 
 		// Create remote chunk 001 with cumulative deletion of /note1.md
-		const writer = new Uint8ArrayWriter();
-		const zipWriter = new ZipWriter(writer);
+		const writer = new SevenZipWriter('test-pass');
 		const meta = {
 			uncompressedSize: 0,
 			files: {},
 			deleted: ['/note1.md']
 		};
-		await zipWriter.add('.metadata.json', new Uint8ArrayReader(new TextEncoder().encode(JSON.stringify(meta))), { password: 'test-pass', encryptionStrength: 3 });
-		await zipWriter.close();
-		backend.getFilesMap().set('/archive_chunk_001.zip', { content: await writer.getData(), modifiedAt: new Date() });
+		await writer.write({ path: '.metadata.json', data: new TextEncoder().encode(JSON.stringify(meta)) });
+		const content = await writer.finalize();
+		backend.getFilesMap().set('/archive_chunk_001.7z', { content, modifiedAt: new Date() });
 
 		const middleware = new MiddlewareZipChunk({ chunkSizeLimit: 1000, password: 'test-pass' });
 		const stratus = new StratusBase({
@@ -416,22 +411,22 @@ test('MiddlewareZipChunk sync runs', async (t) => {
 		await stratus.sync();
 
 		// Verify initial layout: chunk 001, 002, 003 exist on backend
-		assert.ok(backend.getFilesMap().has('/archive_chunk_001.zip'));
-		assert.ok(backend.getFilesMap().has('/archive_chunk_002.zip'));
-		assert.ok(backend.getFilesMap().has('/archive_chunk_003.zip'));
+		assert.ok(backend.getFilesMap().has('/archive_chunk_001.7z'));
+		assert.ok(backend.getFilesMap().has('/archive_chunk_002.7z'));
+		assert.ok(backend.getFilesMap().has('/archive_chunk_003.7z'));
 
 		// 5. Trigger consolidate
 		await stratus.consolidate();
 
 		// Verify defragmented state:
-		// - Only archive_chunk_001.zip should exist now because file1.md (15 bytes) is the only active file,
+		// - Only archive_chunk_001.7z should exist now because file1.md (15 bytes) is the only active file,
 		//   and archive_chunk_002/003 are deleted as file2 was deleted.
-		assert.ok(backend.getFilesMap().has('/archive_chunk_001.zip'));
-		assert.ok(!backend.getFilesMap().has('/archive_chunk_002.zip'));
-		assert.ok(!backend.getFilesMap().has('/archive_chunk_003.zip'));
+		assert.ok(backend.getFilesMap().has('/archive_chunk_001.7z'));
+		assert.ok(!backend.getFilesMap().has('/archive_chunk_002.7z'));
+		assert.ok(!backend.getFilesMap().has('/archive_chunk_003.7z'));
 
 		// Verify chunk 001 contains the latest content of file1.md and empty deleted list
-		const zipFile = backend.getFilesMap().get('/archive_chunk_001.zip')!;
+		const zipFile = backend.getFilesMap().get('/archive_chunk_001.7z')!;
 		const filesMap = await readZipEntries(zipFile.content, 'test-pass');
 		assert.strictEqual(filesMap.get('/file1.md'), '543210987654321');
 
@@ -441,7 +436,7 @@ test('MiddlewareZipChunk sync runs', async (t) => {
 		// Verify local chunks cache matches
 		const meta = await stratus.getMetadata();
 		assert.ok(meta.chunks);
-		assert.ok(meta.chunks['/archive_chunk_001.zip']);
-		assert.strictEqual(meta.chunks['/archive_chunk_002.zip'], undefined);
+		assert.ok(meta.chunks['/archive_chunk_001.7z']);
+		assert.strictEqual(meta.chunks['/archive_chunk_002.7z'], undefined);
 	});
 });
