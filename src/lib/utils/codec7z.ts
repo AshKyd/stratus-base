@@ -1,46 +1,18 @@
-import JS7z from 'js7z-tools';
-import { createRequire } from 'node:module';
-
-import { resolve } from 'node:path';
-
-// Resolve WASM path directly relative to import.meta.dirname for Node.js
-const wasmPath = resolve(import.meta.dirname, '../../../node_modules/js7z-tools/js7z.wasm');
-
-/**
- * Resolves the location of the .wasm file.
- */
-function locateFile(path: string): string {
-	if (path.endsWith('.wasm')) {
-		if (wasmPath) {
-			return wasmPath;
-		}
-		return new URL('js7z-tools/js7z.wasm', import.meta.url).href;
-	}
-	return path;
-}
+import JS7zModule from 'js7z-tools';
+const JS7z = JS7zModule as unknown as (...args: unknown[]) => Promise<any>;
 
 export interface SevenZipEntry {
 	path: string;
 	data: Uint8Array;
 }
 
-/**
- * Progressive writer to compile files into a 7z archive in virtual memory.
- *
- * @example
- * // Archive files from the Origin Private File System (OPFS) and upload
- * const writer = new SevenZipWriter('my-secure-password');
- *
- * for (const path of pathsToArchive) {
- *   const fileHandle = await opfsRootDirectory.getFileHandle(path);
- *   const file = await fileHandle.getFile();
- *   const data = new Uint8Array(await file.arrayBuffer());
- *
- *   await writer.write({ path, data });
- * }
- *
- * const archiveBytes = await writer.finalize();
- */
+/** Resolve the .wasm asset URL for js7z. Vite rewrites new URL() to emitted hashed asset. */
+function locateFile(path: string): string {
+	if (!path.endsWith('.wasm')) return path;
+	return new URL('../../node_modules/js7z-tools/' + path, import.meta.url).href;
+}
+
+
 export class SevenZipWriter {
 	private password?: string;
 	private entries: SevenZipEntry[] = [];
@@ -115,14 +87,14 @@ export class SevenZipWriter {
  *
  * @example
  * const reader = new SevenZipReader('my-secure-password');
- * 
+ *
  * // 1. Fetch the remote archive stream
  * const response = await fetch('https://example.com/archive.7z');
  * if (!response.body) throw new Error('Response body is null');
- * 
+ *
  * // 2. Pipe the download response body into the reader's writable stream
  * await response.body.pipeTo(reader.writable);
- * 
+ *
  * // 3. Extract files progressively as an async generator
  * for await (const entry of reader.extract()) {
  *   const fileHandle = await opfsRootDirectory.getFileHandle(entry.path, { create: true });

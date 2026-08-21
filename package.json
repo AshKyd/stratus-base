@@ -18,7 +18,8 @@
 		"dist",
 		"!dist/**/*.test.*",
 		"!dist/**/*.spec.*",
-		"docs"
+		"docs",
+		"licenses"
 	],
 	"sideEffects": [
 		"**/*.css"
