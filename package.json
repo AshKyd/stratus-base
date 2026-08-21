@@ -65,6 +65,7 @@
 		"@vitest/browser": "^4.1.10",
 		"@zip.js/zip.js": "^2.8.51",
 		"dropbox": "^10.45.0",
+		"js7z-tools": "^2.5.0",
 		"playwright": "^1.62.1",
 		"s3rver": "^3.7.1",
 		"vitest": "^4.1.10"

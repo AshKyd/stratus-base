@@ -29,3 +29,6 @@ scratch
 src/lib/__screenshots__/
 debug.txt
 task.md
+
+# 7-Zip test artifacts
+*.7z
