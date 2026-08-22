@@ -515,7 +515,7 @@ export class StratusBase extends EventTarget {
 			operation: 'sync'
 		};
 		const lockBytes = new TextEncoder().encode(JSON.stringify(lockDetails, null, 2));
-		await this.backend.writeFile('/sync.lock', lockBytes, { atomic: true }).finished;
+		await this.backend.writeFile('/sync.lock', lockBytes).finished;
 
 		try {
 			const context: StratusSyncContext = {
