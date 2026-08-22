@@ -32,3 +32,7 @@ task.md
 
 # 7-Zip test artifacts
 *.7z
+
+# Vendored js7z build artifacts — fetched by `npm run setup:js7z` (see scripts/setup-js7z.mjs).
+# The hand-written js7z.cjs.d.ts / js7z.mjs.d.ts type declarations ARE committed.
+src/lib/vendor/*

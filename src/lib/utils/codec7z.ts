@@ -1,17 +1,42 @@
-import JS7zModule from 'js7z-tools';
-const JS7z = JS7zModule as unknown as (...args: unknown[]) => Promise<any>;
+import type { JS7zInstance } from '../vendor/js7z/js7z.cjs.d.ts';
 
 export interface SevenZipEntry {
 	path: string;
 	data: Uint8Array;
 }
 
-/** Resolve the .wasm asset URL for js7z. Vite rewrites new URL() to emitted hashed asset. */
+// The single-threaded build is vendored next to this module (no SharedArrayBuffer / worker
+// requirement, so no COOP/COEP headers needed). A static `new URL(...)` lets Vite emit the
+// .wasm as a hashed asset in browser builds, while Node resolves it straight from the
+// filesystem.
+const js7zWasmUrl = new URL('../vendor/js7z/js7z.wasm', import.meta.url);
+
+/** The resolved js7z.wasm asset URL, exposed for diagnostics/logging. */
+export const JS7Z_WASM_URL = js7zWasmUrl.href;
+
+/** Resolve the .wasm asset URL for js7z. */
 function locateFile(path: string): string {
-	if (!path.endsWith('.wasm')) return path;
-	return new URL('../../node_modules/js7z-tools/' + path, import.meta.url).href;
+	return path.endsWith('.wasm') ? js7zWasmUrl.href : path;
 }
 
+const isNode = typeof process !== 'undefined' && !!process.versions?.node;
+
+// Two copies of the same vendored build are kept: `js7z.cjs` (real CommonJS, so Node's
+// native ESM/CJS interop loads it correctly) and `js7z.mjs` (real ESM, so Vite's dev server
+// doesn't have to interop a local relative-path CJS file — which it does incorrectly,
+// throwing "doesn't provide an export named: 'default'"). Loaded lazily so neither module
+// is evaluated in the environment it isn't meant for.
+let js7zFactoryPromise: Promise<(moduleArg?: Record<string, unknown>) => Promise<JS7zInstance>> | undefined;
+
+function loadJS7zFactory() {
+	js7zFactoryPromise ??= isNode
+		? // @vite-ignore — this branch never runs in a browser bundle (isNode is always
+			// false there); skip static analysis so bundlers don't try to pull the
+			// Node-only CJS build into the client build.
+			import(/* @vite-ignore */ '../vendor/js7z/js7z.cjs').then((mod) => mod.default)
+		: import('../vendor/js7z/js7z.mjs').then((mod) => mod.default);
+	return js7zFactoryPromise;
+}
 
 export class SevenZipWriter {
 	private password?: string;
@@ -42,6 +67,7 @@ export class SevenZipWriter {
 	 * Finalizes compression, executes 7-Zip in MEMFS, and returns the final archive bytes.
 	 */
 	async finalize(): Promise<Uint8Array> {
+		const JS7z = await loadJS7zFactory();
 		const js7z = await JS7z({ locateFile });
 
 		// Prepare workspace directories in virtual MEMFS
@@ -75,6 +101,10 @@ export class SevenZipWriter {
 				} catch (err) {
 					reject(err);
 				}
+			};
+
+			js7z.onAbort = function (reason?: string) {
+				reject(new Error(`7-Zip WASM aborted: ${reason ?? 'unknown'}`));
 			};
 
 			js7z.callMain(args);
@@ -144,6 +174,7 @@ export class SevenZipReader {
 			offset += chunk.length;
 		}
 
+		const JS7z = await loadJS7zFactory();
 		const js7z = await JS7z({ locateFile });
 
 		// Prepare directories
@@ -156,9 +187,12 @@ export class SevenZipReader {
 			args.push(`-p${this.password}`);
 		}
 
-		const exitCode: number = await new Promise((resolve) => {
+		const exitCode: number = await new Promise<number>((resolve, reject) => {
 			js7z.onExit = function (code: number) {
 				resolve(code);
+			};
+			js7z.onAbort = function (reason?: string) {
+				reject(new Error(`7-Zip WASM aborted during extract: ${reason ?? 'unknown'}`));
 			};
 			js7z.callMain(args);
 		});

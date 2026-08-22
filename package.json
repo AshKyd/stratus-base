@@ -2,17 +2,18 @@
 	"name": "stratus-base",
 	"version": "0.0.1",
 	"scripts": {
-		"dev": "vite dev",
-		"build": "vite build && npm run prepack",
+		"setup:js7z": "node scripts/setup-js7z.mjs",
+		"dev": "npm run setup:js7z && vite dev",
+		"build": "npm run setup:js7z && vite build && npm run prepack",
 		"preview": "vite preview",
-		"prepare": "svelte-kit sync || echo ''",
+		"prepare": "npm run setup:js7z && (svelte-kit sync || echo '')",
 		"prepack": "svelte-kit sync && svelte-package && publint",
 		"check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
 		"check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
 		"lint": "prettier --check . && eslint .",
 		"format": "prettier --write .",
-		"test": "node --experimental-strip-types --test \"src/lib/**/*.test.ts\"",
-		"test:browser": "vitest run --config vitest.config.ts"
+		"test": "npm run setup:js7z && node --experimental-strip-types --test \"src/lib/**/*.test.ts\"",
+		"test:browser": "npm run setup:js7z && vitest run --config vitest.config.ts"
 	},
 	"files": [
 		"dist",
@@ -64,11 +65,10 @@
 	"dependencies": {
 		"@aws-sdk/client-s3": "^3.1111.0",
 		"@vitest/browser": "^4.1.10",
-		"@zip.js/zip.js": "^2.8.51",
 		"dropbox": "^10.45.0",
-		"js7z-tools": "^2.5.0",
 		"playwright": "^1.62.1",
 		"s3rver": "^3.7.1",
-		"vitest": "^4.1.10"
+		"vitest": "^4.1.10",
+		"zx": "^8.8.5"
 	}
 }

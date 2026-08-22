@@ -23,7 +23,12 @@ export { MiddlewareIndividualFile } from './middleware/MiddlewareIndividualFile/
 export type { MiddlewareIndividualFileOptions } from './middleware/MiddlewareIndividualFile/MiddlewareIndividualFile.ts';
 
 export { MiddlewareZipChunk } from './middleware/MiddlewareZipChunk/MiddlewareZipChunk.ts';
-export type { MiddlewareZipChunkOptions } from './middleware/MiddlewareZipChunk/MiddlewareZipChunk.ts';
+export type {
+	MiddlewareZipChunkOptions,
+	SmokeTestStep,
+	SmokeTestStepReporter
+} from './middleware/MiddlewareZipChunk/MiddlewareZipChunk.ts';
+export { JS7Z_WASM_URL } from './utils/codec7z.ts';
 
 export { MemoryStorage } from './backends/MemoryStorage.ts';
 

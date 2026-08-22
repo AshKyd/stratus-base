@@ -9,13 +9,31 @@ import type {
 	ChunkMetadata
 } from '../../StratusBase.ts';
 import { SyncConflictError } from '../../StratusBase.ts';
-import { SevenZipWriter, SevenZipReader } from '../../utils/codec7z.ts';
+import { SevenZipWriter, SevenZipReader, JS7Z_WASM_URL } from '../../utils/codec7z.ts';
 
 export interface MiddlewareZipChunkOptions {
 	chunkSizeLimit?: number; // Target chunk size limit, default 5MB
 	atomic?: boolean;        // Perform atomic writes on backend if supported
 	password?: string;       // Password for AES-256 encryption (required)
 }
+
+/** Ordered steps the 7z smoke test walks through, for step-by-step debug logging. */
+export type SmokeTestStep =
+	| 'resolve-wasm-url'
+	| 'construct-writer'
+	| 'write-entry'
+	| 'finalize-archive'
+	| 'construct-reader'
+	| 'append-chunk'
+	| 'extract-archive'
+	| 'verify-content';
+
+/** Reports the outcome of a single smoke test step, for external debug logging. */
+export type SmokeTestStepReporter = (
+	step: SmokeTestStep,
+	status: 'start' | 'ok' | 'fail',
+	detail?: unknown
+) => void;
 
 /**
  * MiddlewareZipChunk splits and appends local changes into zip chunks of a target size (default 5MB).
@@ -55,6 +73,95 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 				};
 			})
 			.sort((a, b) => a.num - b.num);
+	}
+
+	/**
+	 * Smoke test for the 7-Zip implementation. Loads the WASM module, writes a test file
+	 * into an archive via `SevenZipWriter`, reads it back through `SevenZipReader`, and
+	 * verifies the extracted content matches what was originally written.
+	 *
+	 * This is **not** part of the sync pipeline — its only purpose is to confirm that the
+	 * vendored single-threaded js7z WASM binary resolves and initializes correctly in this
+	 * project's build configuration (Vite / ESBuild / etc.). If this method throws, the
+	 * WASM file path is likely misconfigured.
+	 *
+	 * Pass `onStep` to observe each stage as it happens (e.g. to `console.debug` from a
+	 * calling app) — this pinpoints exactly which stage a "wasm module not found" style
+	 * failure happens at, rather than only seeing the final rejection.
+	 *
+	 * @returns `true` if the round-trip succeeded.
+	 */
+	async smokeTestSevenZip(onStep?: SmokeTestStepReporter): Promise<boolean> {
+		const testName = '__smoke_test__.txt';
+		const testContent = new TextEncoder().encode('smoke-test-ok');
+
+		const runStep = async <T>(
+			step: SmokeTestStep,
+			detail: unknown,
+			fn: () => Promise<T> | T
+		): Promise<T> => {
+			onStep?.(step, 'start', detail);
+			try {
+				const result = await fn();
+				onStep?.(step, 'ok', result);
+				return result;
+			} catch (err) {
+				onStep?.(step, 'fail', err);
+				throw err;
+			}
+		};
+
+		// 0. Surface the resolved wasm asset URL before touching any wasm code, so a
+		// misconfigured build (wrong base path, missing asset, 404) is visible up front.
+		await runStep('resolve-wasm-url', undefined, () => JS7Z_WASM_URL);
+
+		// 1. Build archive in memory
+		const writer = await runStep('construct-writer', undefined, () => new SevenZipWriter(this.password));
+		await runStep('write-entry', { path: testName, size: testContent.length }, () =>
+			writer.write({ path: testName, data: testContent })
+		);
+
+		// 2. Finalize with a timeout guard — hangs usually mean the WASM failed to initialise
+		const archiveBytes = await runStep('finalize-archive', undefined, () =>
+			Promise.race([
+				writer.finalize(),
+				new Promise<never>((_, reject) =>
+					setTimeout(
+						() =>
+							reject(
+								new Error(
+									`[7z] finalize timed out after 30s — check that ${JS7Z_WASM_URL} resolves correctly`
+								)
+							),
+						30_000
+					)
+				)
+			])
+		);
+
+		// 3. Read back and verify
+		const reader = await runStep('construct-reader', undefined, () => new SevenZipReader(this.password));
+		await runStep('append-chunk', { size: archiveBytes.length }, () => reader.appendChunk(archiveBytes));
+
+		const entries = await runStep('extract-archive', undefined, async () => {
+			const collected: { path: string; data: Uint8Array }[] = [];
+			for await (const entry of reader.extract()) {
+				collected.push(entry);
+			}
+			return collected;
+		});
+
+		return runStep('verify-content', { entryCount: entries.length }, () => {
+			const match = entries.find(
+				(entry) =>
+					entry.path === testName &&
+					new Uint8Array(entry.data).toString() === testContent.toString()
+			);
+			if (!match) {
+				throw new Error('7z smoke test failed: extracted content mismatch or missing file');
+			}
+			return true;
+		});
 	}
 
 	/**

@@ -101,6 +101,16 @@ await client.reset();
 
 ---
 
+## Development Setup
+
+`MiddlewareZipChunk` depends on a vendored js7z WASM build (`src/lib/vendor/js7z/`) that is
+**not committed** — it's fetched from the upstream [JS7z](https://github.com/GMH-Code/JS7z)
+release by `npm run setup:js7z` (see `scripts/setup-js7z.mjs`). `dev`, `build`, `test`, and
+`test:browser` all run this automatically first, so a plain `npm install` followed by any of
+those commands is enough; run it manually (add `--force` to refetch) if you need to.
+
+---
+
 ## Testing
 
 The project has two test suites: unit tests using Node's native test runner and E2E integration tests running in a headless Chromium browser via Vitest and Playwright.
