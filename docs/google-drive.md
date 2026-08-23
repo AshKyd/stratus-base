@@ -40,69 +40,150 @@ This guide outlines how to configure a Google Cloud Project and initialize the `
 
 1. Go to **APIs & Services > Credentials** from the left navigation menu.
 2. Click **Create Credentials** at the top and select **OAuth client ID**.
-3. Select **Desktop app** (or **Desktop**) as the Application type.
-4. Name your client ID (e.g., "Stratus Desktop Client").
-5. Click **Create**.
-6. Copy the generated **Client ID** (Desktop apps do not use or expose a Client Secret).
+3. Select **Web application** as the Application type. Browser flows require this type —
+   a Desktop app client only permits loopback redirect URIs and will reject your site's URL.
+4. Name your client ID (e.g., "Stratus Web Client").
+5. Under **Authorised JavaScript origins**, add each origin the app is served from:
+   - `http://localhost:5173` (development)
+   - `https://your-domain.example` (production)
+6. Under **Authorised redirect URIs**, add your callback route on each origin. Use one route
+   for every flow — see section 5:
+   - `http://localhost:5173/auth/callback`
+   - `https://your-domain.example/auth/callback`
+7. Click **Create** and copy the generated **Client ID**.
+
+A Web application client also issues a Client Secret. `GoogleDriveStorage` never uses it, and
+it must not be shipped to the browser. Leave it unused.
 
 ---
 
-## 5. Implement the Auth Flow in Client-Side JS
+## 5. Add the Callback Route
 
-Since `GoogleDriveStorage` runs exclusively in the client browser, it uses the secure **OAuth 2.0 Authorization Code Flow with PKCE**, which does not require exposing your Client Secret.
+`GoogleDriveStorage` uses one redirect URI for everything: first-time authorisation, returning
+sign-in, and silent renewal. Register that single URL in the console and point the backend at
+it.
 
-### Step A: Initialize the Backend
+Create a route at the path you registered (e.g. `/auth/callback`) and call
+`GoogleDriveStorage.handleAuthCallback()` from it. It reads the OAuth response out of the URL
+fragment and tells you which kind of callback this was:
+
+| `mode` | Meaning | What to do |
+|---|---|---|
+| `popup` | A silent renewal completed. The result has already been posted to the opening window, which is closing itself. | Nothing. Render a placeholder. |
+| `redirect` | A full interactive flow completed. `credentials` and `state` are returned. | Save the credentials and route the user onward. |
+| `error` | Google declined the request. | Show the error and offer to sign in again. |
+
+A `null` return means the URL carries no OAuth response — someone navigated to the route
+directly.
+
+```typescript
+import { GoogleDriveStorage } from 'stratus-base';
+
+const result = GoogleDriveStorage.handleAuthCallback();
+
+if (!result) {
+  goto(resolve('/login'));
+} else if (result.mode === 'redirect') {
+  backend.setCredentials(result.credentials);
+  localStorage.setItem('google_drive_creds', JSON.stringify(result.credentials));
+  goto(resolve('/'));
+} else if (result.mode === 'error') {
+  console.error(result.error);
+}
+```
+
+`handleAuthCallback()` strips the access token from the address bar before returning, so it
+does not linger in browser history.
+
+---
+
+## 6. Start the Interactive Flow
+
+### Initialise the backend
 ```typescript
 import { GoogleDriveStorage } from 'stratus-base';
 
 const backend = new GoogleDriveStorage({
-  clientId: 'YOUR_GOOGLE_CLIENT_ID' // Found in Google Cloud Credentials
+  clientId: 'YOUR_GOOGLE_CLIENT_ID',
+  redirectUri: window.location.origin + '/auth/callback'
 });
 ```
 
-### Step B: Redirect to Google Login
+Setting `redirectUri` here means `getAuthUrl()` and `renewAccessToken()` both use it without
+being told each time.
+
+### Send the user to Google
 ```typescript
-async function login() {
-  const redirectUri = 'http://localhost:5173/test/google-drive';
-  // Generates auth URL and automatically saves the PKCE code_verifier in sessionStorage
-  const authUrl = await backend.getAuthUrl(redirectUri);
-  window.location.href = authUrl;
-}
+const authUrl = await backend.getAuthUrl(undefined, 'login');
+window.location.href = authUrl;
 ```
 
-### Step C: Handle the Redirect Callback
-On your callback page (e.g., `/test/google-drive`):
-```typescript
-import { onMount } from 'svelte';
-import { goto } from '$app/navigation';
-import { resolve } from '$app/paths';
+The second argument is an optional `state` value, returned unchanged on the callback.
 
-onMount(async () => {
-  const urlParams = new URLSearchParams(window.location.search);
-  const code = urlParams.get('code');
-  const redirectUri = 'http://localhost:5173/test/google-drive';
-
-  if (code) {
-    // Exchanges code using the saved sessionStorage verifier and saves credentials internally
-    const credentials = await backend.exchangeCode(code, redirectUri);
-    
-    // Save to localStorage for persistence across reloads
-    localStorage.setItem('google_drive_creds', JSON.stringify(credentials));
-    
-    goto(resolve('/'));
-  }
-});
-```
-
-### Step D: Restore Credentials on Load
+### Restore credentials on load
 ```typescript
 const storedCreds = localStorage.getItem('google_drive_creds');
 if (storedCreds) {
   backend.setCredentials(JSON.parse(storedCreds));
 }
 
-// Check if authenticated (automatic token refresh happens here if needed)
 if (await backend.isConfigured()) {
   console.log('Google Drive is ready!');
 }
 ```
+
+---
+
+## 7. Keeping the Session Alive
+
+Google access tokens are short-lived. `renewAccessToken()` obtains a new one without showing
+the consent screen, by opening a brief popup against Google with `prompt=none`.
+
+**This must be called from a user gesture.** Browsers block popups that are not opened during
+a click or keypress, so the token cannot be renewed from a timer or a background task.
+
+The backend emits three events to drive this:
+
+| Event | Payload | Meaning |
+|---|---|---|
+| `token-expiring` | `{ expiresAt }` | The token is inside its warning window (10 minutes by default, configurable via `expiryWarningMs`). Renew on the next gesture. |
+| `token-renewed` | `StorageAuthCredentials` | A new token was obtained. Persist it. |
+| `reauth-required` | `{ reason }` | Silent renewal is not possible. Run the full interactive flow. |
+
+`on()` returns an unsubscribe function.
+
+The pattern is to renew *early*, on ordinary interaction, rather than at the point of failure:
+
+```typescript
+let pendingRenewal = false;
+
+backend.on('token-expiring', () => { pendingRenewal = true; });
+backend.on('token-renewed', (credentials) => {
+  pendingRenewal = false;
+  localStorage.setItem('google_drive_creds', JSON.stringify(credentials));
+});
+backend.on('reauth-required', ({ reason }) => {
+  pendingRenewal = false;
+  showReconnectPrompt(reason);
+});
+
+// Attach to any click or keypress. Cheap — it returns immediately unless a renewal is due.
+async function onInteraction() {
+  if (!pendingRenewal) return;
+  pendingRenewal = false;
+  await backend.renewAccessToken().catch(() => {});
+}
+```
+
+In an app the user interacts with regularly, the renewal lands well before the token lapses
+and nothing is visible. `reason` on `reauth-required` distinguishes `popup-blocked`,
+`popup-closed`, `timeout`, `unauthorised`, and Google's own `login_required`,
+`consent_required`, and `interaction_required`.
+
+### What is not possible
+
+`GoogleDriveStorage` does not use refresh tokens, and cannot. Minting or redeeming one
+requires a POST to Google's token endpoint, which demands the Client Secret even when PKCE is
+used, and does not send CORS headers. Both rule it out from a browser. Silent renewal via
+`renewAccessToken()` is the client-side substitute, with the limits described above: it needs
+a gesture, and it stops working once the user's Google session ends.

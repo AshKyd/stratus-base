@@ -2,7 +2,13 @@ export * from './types.ts';
 export { DropboxStorage } from './backends/DropboxStorage.ts';
 export type { DropboxStorageOptions } from './backends/DropboxStorage.ts';
 export { GoogleDriveStorage } from './backends/GoogleDriveStorage.ts';
-export type { GoogleDriveStorageOptions } from './backends/GoogleDriveStorage.ts';
+export type {
+	GoogleDriveStorageOptions,
+	GoogleAuthEvent,
+	GoogleAuthEventPayloads,
+	GoogleAuthCallbackResult,
+	GoogleReauthReason
+} from './backends/GoogleDriveStorage.ts';
 export { GithubStorage } from './backends/GithubStorage.ts';
 export type { GithubStorageOptions } from './backends/GithubStorage.ts';
 export { S3Storage } from './backends/S3Storage.ts';

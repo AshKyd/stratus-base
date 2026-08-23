@@ -7,7 +7,47 @@ import type {
 } from '../types.ts';
 import { BaseStorageOperation } from '../utils/BaseStorageOperation.ts';
 
+/**
+ * Authentication lifecycle events emitted by {@link GoogleDriveStorage}.
+ *
+ * - `token-expiring` — the access token is approaching expiry. Renew it from a user
+ *   gesture while it is still valid.
+ * - `token-renewed` — a new access token was obtained. Persist the supplied credentials.
+ * - `reauth-required` — silent renewal is not possible and the full interactive flow
+ *   must be run.
+ */
+export type GoogleAuthEvent = 'token-expiring' | 'token-renewed' | 'reauth-required';
 
+/**
+ * Why silent renewal could not complete. `popup-blocked` means the browser suppressed
+ * the renewal window, which happens when renewal is not triggered by a user gesture.
+ */
+export type GoogleReauthReason =
+	| 'popup-blocked'
+	| 'popup-closed'
+	| 'timeout'
+	| 'unauthorised'
+	| 'login_required'
+	| 'consent_required'
+	| 'interaction_required';
+
+export interface GoogleAuthEventPayloads {
+	'token-expiring': { expiresAt: number };
+	'token-renewed': StorageAuthCredentials;
+	'reauth-required': { reason: GoogleReauthReason };
+}
+
+/**
+ * Outcome of handling an OAuth redirect, returned by
+ * {@link GoogleDriveStorage.handleAuthCallback}.
+ *
+ * `popup` means the result was handed back to the opening window and this window is
+ * closing itself — the callback route should render nothing further.
+ */
+export type GoogleAuthCallbackResult =
+	| { mode: 'popup' }
+	| { mode: 'redirect'; credentials: StorageAuthCredentials; state?: string }
+	| { mode: 'error'; error: string; state?: string };
 
 /**
  * Configuration options for initializing the Google Drive storage backend.
@@ -25,7 +65,27 @@ export interface GoogleDriveStorageOptions {
 	 * Optional custom root folder name to scope files.
 	 */
 	folderName?: string;
+	/**
+	 * Default OAuth callback URL, used by `getAuthUrl()` and `renewAccessToken()` when no
+	 * URI is passed explicitly. Must exactly match an authorised redirect URI in the
+	 * Google Cloud Console.
+	 */
+	redirectUri?: string;
+	/**
+	 * How long before expiry to emit `token-expiring`, in milliseconds. Defaults to 10
+	 * minutes, which gives an active user several opportunities to renew on a gesture
+	 * before the token actually lapses.
+	 */
+	expiryWarningMs?: number;
 }
+
+/** Marks the `state` of a renewal request so the callback can route it to the opener. */
+const RENEWAL_STATE_PREFIX = 'stratus-renew:';
+
+/** Identifies postMessage payloads sent by the callback handler. */
+const MESSAGE_SOURCE = 'stratus-base';
+
+const DEFAULT_EXPIRY_WARNING_MS = 10 * 60 * 1000;
 
 /**
  * StorageBackend implementation for Google Drive, running exclusively on the client side.
@@ -39,16 +99,57 @@ export class GoogleDriveStorage implements StorageBackend {
 	private expiresAt?: number;
 	private folderName?: string;
 	private rootFolderId?: string;
+	private redirectUri?: string;
+	private expiryWarningMs: number;
 
 	// Local cache mapping paths to Google Drive file IDs
 	private pathIdCache = new Map<string, string>();
 
+	private listeners = new Map<GoogleAuthEvent, Set<(payload: never) => void>>();
+	private expiryTimer?: ReturnType<typeof setTimeout>;
+
+	// Coalesces concurrent renewal attempts into a single popup.
+	private renewalPromise?: Promise<StorageAuthCredentials>;
+
 	constructor(options: GoogleDriveStorageOptions) {
 		this.clientId = options.clientId;
 		this.folderName = options.folderName;
+		this.redirectUri = options.redirectUri;
+		this.expiryWarningMs = options.expiryWarningMs ?? DEFAULT_EXPIRY_WARNING_MS;
 		if (options.credentials) {
 			this.setCredentials(options.credentials);
 		}
+	}
+
+	/**
+	 * Subscribes to an authentication lifecycle event.
+	 *
+	 * @returns An unsubscribe function.
+	 */
+	on<E extends GoogleAuthEvent>(
+		event: E,
+		callback: (payload: GoogleAuthEventPayloads[E]) => void
+	): () => void {
+		const existing = this.listeners.get(event) ?? new Set();
+		existing.add(callback as (payload: never) => void);
+		this.listeners.set(event, existing);
+		return () => this.off(event, callback);
+	}
+
+	/**
+	 * Removes a previously registered event listener.
+	 */
+	off<E extends GoogleAuthEvent>(
+		event: E,
+		callback: (payload: GoogleAuthEventPayloads[E]) => void
+	): void {
+		this.listeners.get(event)?.delete(callback as (payload: never) => void);
+	}
+
+	private emit<E extends GoogleAuthEvent>(event: E, payload: GoogleAuthEventPayloads[E]): void {
+		this.listeners.get(event)?.forEach((callback) => {
+			(callback as (payload: GoogleAuthEventPayloads[E]) => void)(payload);
+		});
 	}
 
 	/**
@@ -63,14 +164,29 @@ export class GoogleDriveStorage implements StorageBackend {
 	/**
 	 * Generates the redirect URL to start the Google OAuth 2.0 flow.
 	 *
-	 * @param redirectUri The callback URL registered in the Google Cloud Console.
-	 * @param state Optional state parameter.
+	 * @param redirectUri The callback URL registered in the Google Cloud Console. Falls back
+	 *   to the `redirectUri` given to the constructor.
+	 * @param state Optional state parameter, returned unchanged on the callback. Use it to
+	 *   record where the user should land once authorisation completes.
+	 * @param options.prompt Passed through to Google. `none` suppresses all UI and instead
+	 *   returns an error when the request cannot be satisfied silently.
 	 * @returns The Google OAuth URL.
 	 */
-	async getAuthUrl(redirectUri: string, state?: string): Promise<string> {
+	async getAuthUrl(
+		redirectUri?: string,
+		state?: string,
+		options?: { prompt?: 'none' | 'consent' | 'select_account' }
+	): Promise<string> {
+		const callbackUri = redirectUri ?? this.redirectUri;
+		if (!callbackUri) {
+			throw new Error(
+				'No redirect URI available. Pass one to getAuthUrl(), or set redirectUri when constructing GoogleDriveStorage.'
+			);
+		}
+
 		const params = new URLSearchParams({
 			client_id: this.clientId,
-			redirect_uri: redirectUri,
+			redirect_uri: callbackUri,
 			response_type: 'token',
 			scope: 'https://www.googleapis.com/auth/drive.file'
 		});
@@ -79,7 +195,160 @@ export class GoogleDriveStorage implements StorageBackend {
 			params.set('state', state);
 		}
 
+		if (options?.prompt) {
+			params.set('prompt', options.prompt);
+		}
+
 		return `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`;
+	}
+
+	/**
+	 * Attempts to obtain a fresh access token without showing the consent screen, by opening
+	 * a short-lived popup against Google with `prompt=none`.
+	 *
+	 * Browsers only permit popups opened during a user gesture, so this must be called from
+	 * a click/keypress handler. The practical pattern is to listen for `token-expiring` and
+	 * renew on the user's next interaction, well before the token actually lapses.
+	 *
+	 * Concurrent calls share a single popup.
+	 *
+	 * @throws If the popup is blocked, dismissed, times out, or Google declines to authorise
+	 *   silently. `reauth-required` is emitted in each of those cases.
+	 */
+	async renewAccessToken(
+		options: { redirectUri?: string; timeoutMs?: number } = {}
+	): Promise<StorageAuthCredentials> {
+		if (this.renewalPromise) {
+			return this.renewalPromise;
+		}
+
+		this.renewalPromise = this.runSilentRenewal(
+			options.redirectUri ?? this.redirectUri,
+			options.timeoutMs ?? 30_000
+		).finally(() => {
+			this.renewalPromise = undefined;
+		});
+
+		return this.renewalPromise;
+	}
+
+	private async runSilentRenewal(
+		redirectUri: string | undefined,
+		timeoutMs: number
+	): Promise<StorageAuthCredentials> {
+		if (typeof window === 'undefined') {
+			throw new Error('renewAccessToken() is only available in the browser.');
+		}
+
+		const state = `${RENEWAL_STATE_PREFIX}${crypto.randomUUID()}`;
+		const authUrl = await this.getAuthUrl(redirectUri, state, { prompt: 'none' });
+
+		const popup = window.open(
+			authUrl,
+			'stratus-auth-renewal',
+			'width=500,height=600,menubar=no,toolbar=no'
+		);
+
+		if (!popup) {
+			this.emit('reauth-required', { reason: 'popup-blocked' });
+			throw new Error(
+				'The renewal popup was blocked. Call renewAccessToken() from a user gesture, such as a click handler.'
+			);
+		}
+
+		return new Promise<StorageAuthCredentials>((resolve, reject) => {
+			let settled = false;
+
+			const cleanup = () => {
+				settled = true;
+				window.removeEventListener('message', onMessage);
+				clearInterval(closedPoll);
+				clearTimeout(timer);
+				if (!popup.closed) popup.close();
+			};
+
+			const fail = (reason: GoogleReauthReason, message: string) => {
+				if (settled) return;
+				cleanup();
+				this.emit('reauth-required', { reason });
+				reject(new Error(message));
+			};
+
+			const onMessage = (event: MessageEvent) => {
+				if (settled || event.origin !== window.location.origin) return;
+
+				const data = event.data;
+				if (data?.source !== MESSAGE_SOURCE || data.state !== state) return;
+
+				if (data.error) {
+					fail(data.error as GoogleReauthReason, `Silent renewal declined by Google: ${data.error}`);
+					return;
+				}
+
+				cleanup();
+				this.setCredentials(data.credentials);
+				const credentials = this.getCredentials();
+				this.emit('token-renewed', credentials);
+				resolve(credentials);
+			};
+
+			window.addEventListener('message', onMessage);
+
+			// The popup closes itself once it has posted its result; if it closes without one,
+			// the user dismissed it.
+			const closedPoll = setInterval(() => {
+				if (popup.closed) fail('popup-closed', 'The renewal popup was closed before it completed.');
+			}, 300);
+
+			const timer = setTimeout(() => fail('timeout', 'Silent renewal timed out.'), timeoutMs);
+		});
+	}
+
+	/**
+	 * Reads an OAuth result from the current URL fragment. Call this from the callback route
+	 * registered as your redirect URI — it serves both the interactive flow and silent
+	 * renewal.
+	 *
+	 * When the window was opened by {@link renewAccessToken}, the result is posted back to
+	 * the opener and this window closes itself. Otherwise the parsed credentials are returned
+	 * along with the `state` passed to {@link getAuthUrl}, so the caller can route onward.
+	 *
+	 * @returns `null` when the URL carries no OAuth response.
+	 */
+	static handleAuthCallback(): GoogleAuthCallbackResult | null {
+		if (typeof window === 'undefined') return null;
+
+		const fragment = window.location.hash.replace(/^#/, '');
+		if (!fragment) return null;
+
+		const params = new URLSearchParams(fragment);
+		const accessToken = params.get('access_token');
+		const error = params.get('error');
+		if (!accessToken && !error) return null;
+
+		const state = params.get('state') ?? undefined;
+		const credentials: StorageAuthCredentials | undefined = accessToken
+			? {
+					accessToken,
+					expiresAt: Date.now() + Number(params.get('expires_in') || 3600) * 1000
+				}
+			: undefined;
+
+		if (window.opener && state?.startsWith(RENEWAL_STATE_PREFIX)) {
+			window.opener.postMessage(
+				{ source: MESSAGE_SOURCE, state, credentials, error: error ?? undefined },
+				window.location.origin
+			);
+			// Give the message a moment to land before tearing the window down.
+			setTimeout(() => window.close(), 100);
+			return { mode: 'popup' };
+		}
+
+		// Keep the access token out of the address bar and out of history.
+		window.history.replaceState({}, '', window.location.pathname + window.location.search);
+
+		if (error) return { mode: 'error', error, state };
+		return { mode: 'redirect', credentials: credentials!, state };
 	}
 
 	/**
@@ -105,6 +374,7 @@ export class GoogleDriveStorage implements StorageBackend {
 		this.accessToken = credentials.accessToken;
 		this.refreshToken = credentials.refreshToken;
 		this.expiresAt = credentials.expiresAt;
+		this.scheduleExpiryWarning();
 	}
 
 	/**
@@ -115,6 +385,41 @@ export class GoogleDriveStorage implements StorageBackend {
 		this.refreshToken = undefined;
 		this.expiresAt = undefined;
 		this.rootFolderId = undefined;
+		this.pathIdCache.clear();
+		clearTimeout(this.expiryTimer);
+		this.expiryTimer = undefined;
+	}
+
+	/**
+	 * Arms the `token-expiring` warning so consumers can renew while the token is still
+	 * valid. Fires immediately when the token is already inside the warning window.
+	 */
+	private scheduleExpiryWarning(): void {
+		clearTimeout(this.expiryTimer);
+		this.expiryTimer = undefined;
+
+		if (typeof window === 'undefined' || !this.expiresAt) return;
+
+		const expiresAt = this.expiresAt;
+		const delay = Math.max(0, expiresAt - this.expiryWarningMs - Date.now());
+		this.expiryTimer = setTimeout(() => this.emit('token-expiring', { expiresAt }), delay);
+	}
+
+	/**
+	 * Issues an authenticated request, flagging the session as dead when Google rejects the
+	 * token. Callers still receive the response so existing error handling applies.
+	 */
+	private async fetchWithAuth(url: string, init: RequestInit = {}): Promise<Response> {
+		const response = await fetch(url, {
+			...init,
+			headers: { ...init.headers, Authorization: `Bearer ${this.accessToken}` }
+		});
+
+		if (response.status === 401) {
+			this.emit('reauth-required', { reason: 'unauthorised' });
+		}
+
+		return response;
 	}
 
 
@@ -132,9 +437,7 @@ export class GoogleDriveStorage implements StorageBackend {
 		const escapedName = this.folderName.replace(/'/g, "\\'");
 		const q = `name = '${escapedName}' and 'root' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`;
 		const url = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id)`;
-		const res = await fetch(url, {
-			headers: { Authorization: `Bearer ${this.accessToken}` }
-		});
+		const res = await this.fetchWithAuth(url);
 
 		if (!res.ok) {
 			const errBody = await res.text().catch(() => '');
@@ -149,10 +452,9 @@ export class GoogleDriveStorage implements StorageBackend {
 			return this.rootFolderId!;
 		}
 
-		const createRes = await fetch('https://www.googleapis.com/drive/v3/files', {
+		const createRes = await this.fetchWithAuth('https://www.googleapis.com/drive/v3/files', {
 			method: 'POST',
 			headers: {
-				Authorization: `Bearer ${this.accessToken}`,
 				'Content-Type': 'application/json'
 			},
 			body: JSON.stringify({
@@ -206,9 +508,7 @@ export class GoogleDriveStorage implements StorageBackend {
 			const escapedSegment = segment.replace(/'/g, "\\'");
 			const q = `name = '${escapedSegment}' and '${currentId}' in parents and trashed = false`;
 			const url = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id,mimeType)`;
-			const res = await fetch(url, {
-				headers: { Authorization: `Bearer ${this.accessToken}` }
-			});
+			const res = await this.fetchWithAuth(url);
 
 			if (!res.ok) {
 				throw new Error(`Failed to resolve path segment ${segment} at ${currentPath}: ${res.statusText}`);
@@ -223,10 +523,9 @@ export class GoogleDriveStorage implements StorageBackend {
 			} else {
 				if (createDirectories) {
 					// Create folder
-					const createRes = await fetch('https://www.googleapis.com/drive/v3/files', {
+					const createRes = await this.fetchWithAuth('https://www.googleapis.com/drive/v3/files', {
 						method: 'POST',
 						headers: {
-							Authorization: `Bearer ${this.accessToken}`,
 							'Content-Type': 'application/json'
 						},
 						body: JSON.stringify({
@@ -276,9 +575,7 @@ export class GoogleDriveStorage implements StorageBackend {
 			if (!fileId) return null;
 
 			const url = `https://www.googleapis.com/drive/v3/files/${fileId}?fields=id,name,mimeType,size,modifiedTime`;
-			const res = await fetch(url, {
-				headers: { Authorization: `Bearer ${this.accessToken}` }
-			});
+			const res = await this.fetchWithAuth(url);
 
 			if (res.status === 404) {
 				this.invalidateCache(path);
@@ -317,10 +614,10 @@ export class GoogleDriveStorage implements StorageBackend {
 				throw new Error(`File not found: ${path}`);
 			}
 
-			const response = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {
-				headers: { Authorization: `Bearer ${this.accessToken}` },
-				signal
-			});
+			const response = await this.fetchWithAuth(
+				`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`,
+				{ signal }
+			);
 
 			if (!response.ok) {
 				throw new Error(`Failed to download file: ${response.statusText}`);
@@ -370,10 +667,9 @@ export class GoogleDriveStorage implements StorageBackend {
 				const fileId = await this.resolvePath(targetPath);
 				if (fileId) {
 					// Update existing file
-					const res = await fetch(`https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media`, {
+					const res = await this.fetchWithAuth(`https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media`, {
 						method: 'PATCH',
 						headers: {
-							Authorization: `Bearer ${this.accessToken}`,
 							'Content-Type': 'application/octet-stream'
 						},
 						body: content as any,
@@ -390,10 +686,9 @@ export class GoogleDriveStorage implements StorageBackend {
 					const parentId = await this.resolvePath(parentPath, true);
 
 					// Create empty file metadata
-					const metadataRes = await fetch('https://www.googleapis.com/drive/v3/files', {
+					const metadataRes = await this.fetchWithAuth('https://www.googleapis.com/drive/v3/files', {
 						method: 'POST',
 						headers: {
-							Authorization: `Bearer ${this.accessToken}`,
 							'Content-Type': 'application/json'
 						},
 						body: JSON.stringify({
@@ -410,10 +705,9 @@ export class GoogleDriveStorage implements StorageBackend {
 					const metadata = await metadataRes.json();
 
 					// Upload content
-					const res = await fetch(`https://www.googleapis.com/upload/drive/v3/files/${metadata.id}?uploadType=media`, {
+					const res = await this.fetchWithAuth(`https://www.googleapis.com/upload/drive/v3/files/${metadata.id}?uploadType=media`, {
 						method: 'PATCH',
 						headers: {
-							Authorization: `Bearer ${this.accessToken}`,
 							'Content-Type': 'application/octet-stream'
 						},
 						body: content as any,
@@ -458,9 +752,8 @@ export class GoogleDriveStorage implements StorageBackend {
 		const fileId = await this.resolvePath(path);
 		if (!fileId) return;
 
-		const res = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}`, {
-			method: 'DELETE',
-			headers: { Authorization: `Bearer ${this.accessToken}` }
+		const res = await this.fetchWithAuth(`https://www.googleapis.com/drive/v3/files/${fileId}`, {
+			method: 'DELETE'
 		});
 
 		if (res.status !== 204 && res.status !== 200 && res.status !== 404) {
@@ -494,9 +787,7 @@ export class GoogleDriveStorage implements StorageBackend {
 			}
 
 			const url = `https://www.googleapis.com/drive/v3/files?${params.toString()}`;
-			const res = await fetch(url, {
-				headers: { Authorization: `Bearer ${this.accessToken}` }
-			});
+			const res = await this.fetchWithAuth(url);
 
 			if (!res.ok) {
 				throw new Error(`Failed to list directory: ${res.statusText}`);
@@ -568,10 +859,9 @@ export class GoogleDriveStorage implements StorageBackend {
 			queryParams.set('removeParents', oldParentId);
 		}
 
-		const res = await fetch(`${url}?${queryParams.toString()}`, {
+		const res = await this.fetchWithAuth(`${url}?${queryParams.toString()}`, {
 			method: 'PATCH',
 			headers: {
-				Authorization: `Bearer ${this.accessToken}`,
 				'Content-Type': 'application/json'
 			},
 			body: JSON.stringify({
