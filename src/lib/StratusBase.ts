@@ -285,7 +285,8 @@ export class StratusBase extends EventTarget {
 	}
 
 	/**
-	 * Writes content to a local file and marks its synchronization status as dirty.
+	 * Writes content to a local file and marks its synchronization status.
+	 * If content is identical to existing file, marks as clean. Otherwise marks as dirty.
 	 * @param path Relative path of the file.
 	 * @param content Binary content to write.
 	 * @param options Write-then-rename configurations for atomic writes.
@@ -295,13 +296,30 @@ export class StratusBase extends EventTarget {
 		content: Uint8Array,
 		options?: WriteOptions
 	): Promise<void> {
+		const metadata = await this.getMetadata();
+		const existing = metadata.files[path];
+
+		// Check if content has actually changed by reading existing file first
+		let hasContentChanged = true;
+		if (existing && existing.status !== 'deleted' && existing.size === content.length) {
+			try {
+				const fileHandle = await this.getFileHandle(path, { create: false });
+				const file = await fileHandle.getFile();
+				const existingBuffer = await file.arrayBuffer();
+				const existingContent = new Uint8Array(existingBuffer);
+				// Compare content byte-by-byte
+				hasContentChanged = !existingContent.every((byte, i) => byte === content[i]);
+			} catch {
+				// File doesn't exist or can't be read, treat as changed
+				hasContentChanged = true;
+			}
+		}
+
 		const fileHandle = await this.getFileHandle(path, { create: true });
 		const writable = await fileHandle.createWritable();
 		await writable.write(content as BufferSource);
 		await writable.close();
 
-		const metadata = await this.getMetadata();
-		const existing = metadata.files[path];
 		metadata.files[path] = {
 			path,
 			type: 'file',
@@ -309,7 +327,7 @@ export class StratusBase extends EventTarget {
 			localModifiedAt: Date.now(),
 			remoteModifiedAt: existing ? existing.remoteModifiedAt : 0,
 			etag: existing?.etag,
-			status: 'dirty'
+			status: hasContentChanged ? 'dirty' : 'clean'
 		};
 
 		await this.saveMetadata(metadata);
