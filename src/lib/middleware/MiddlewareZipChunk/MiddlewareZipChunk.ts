@@ -500,7 +500,7 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 			currentChunk.uncompressedSize = Array.from(filesMap.entries())
 				.filter(([name]) => name !== '.metadata.json')
 				.reduce((acc, [, bytes]) => acc + bytes.length, 0);
-			
+
 			const tempPath = `/temp_sync_archive_chunk_${String(currentChunkNum).padStart(3, '0')}.7z`;
 			await this.writeChunk(context, tempPath, filesMap, currentChunk);
 			await context.backend.renameFile(tempPath, currentChunkPath);

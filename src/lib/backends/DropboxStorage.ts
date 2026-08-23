@@ -4,7 +4,6 @@ import type {
 	StorageFileInfo,
 	StorageAuthCredentials,
 	StorageOperation,
-	StorageOperationEvents,
 	WriteOptions
 } from '../types.ts';
 import { BaseStorageOperation } from '../utils/BaseStorageOperation.ts';
@@ -13,23 +12,26 @@ const VERIFIER_KEY = 'dropbox_code_verifier';
 
 /**
  * Checks if a Dropbox API error indicates that the file or folder was not found.
+ * Recursively searches for '.tag': 'not_found' at any nesting level in the error.
  *
  * @param err The error returned by the Dropbox SDK.
- * @returns True if the error is a 404 or path not_found error, false otherwise.
+ * @returns True if the error indicates the file was not found.
  */
 function isNotFoundError(err: any): boolean {
 	if (!err) return false;
 	if (err.status === 404) return true;
-	const errorObj = err.error || err;
-	const pathError = errorObj.path || errorObj.error?.path;
-	if (pathError && pathError['.tag'] === 'not_found') {
-		return true;
-	}
-	if (typeof errorObj === 'object') {
-		const tag = errorObj['.tag'] || (errorObj.error && errorObj.error['.tag']);
-		if (tag === 'not_found') return true;
-	}
-	return false;
+
+	// Recursively check if any '.tag' field equals 'not_found' in the error object
+	const hasNotFoundTag = (obj: any): boolean => {
+		if (!obj || typeof obj !== 'object') return false;
+		if (obj['.tag'] === 'not_found') return true;
+		for (const value of Object.values(obj)) {
+			if (hasNotFoundTag(value)) return true;
+		}
+		return false;
+	};
+
+	return hasNotFoundTag(err.error || err);
 }
 
 /**
@@ -147,17 +149,22 @@ export class DropboxStorage implements StorageBackend {
 			}
 		}
 
-		const response = await this.auth.getAccessTokenFromCode(redirectUri, code);
-		const result = response.result as any;
+		try {
+			const response = await this.auth.getAccessTokenFromCode(redirectUri, code);
+			const result = response.result as any;
 
-		const credentials: StorageAuthCredentials = {
-			accessToken: result.access_token,
-			refreshToken: result.refresh_token,
-			expiresAt: result.expires_in ? Date.now() + result.expires_in * 1000 : undefined
-		};
+			const credentials: StorageAuthCredentials = {
+				accessToken: result.access_token,
+				refreshToken: result.refresh_token,
+				expiresAt: result.expires_in ? Date.now() + result.expires_in * 1000 : undefined
+			};
 
-		this.setCredentials(credentials);
-		return credentials;
+			this.setCredentials(credentials);
+			return credentials;
+		} catch (err) {
+			console.error('[DropboxStorage.exchangeCode] error:', err);
+			throw err;
+		}
 	}
 
 	/**
@@ -201,7 +208,6 @@ export class DropboxStorage implements StorageBackend {
 		this.auth.setAccessTokenExpiresAt(undefined as any);
 	}
 
-
 	/**
 	 * Retrieves metadata for a file or directory at the specified path.
 	 *
@@ -227,6 +233,7 @@ export class DropboxStorage implements StorageBackend {
 			if (isNotFoundError(err)) {
 				return null;
 			}
+			console.error(`[DropboxStorage.stat] error getting metadata for ${path}:`, err);
 			throw err;
 		}
 	}
@@ -239,15 +246,20 @@ export class DropboxStorage implements StorageBackend {
 	 */
 	readFile(path: string): StorageOperation<Uint8Array> {
 		return new BaseStorageOperation(async (signal) => {
-			const response = await this.client.filesDownload({ path }, { signal });
-			const result = response.result;
-			if (result.fileBinary) {
-				return new Uint8Array(result.fileBinary);
+			try {
+				const response = await this.client.filesDownload({ path }, { signal });
+				const result = response.result;
+				if (result.fileBinary) {
+					return new Uint8Array(result.fileBinary);
+				}
+				if (result.fileBlob) {
+					return new Uint8Array(await result.fileBlob.arrayBuffer());
+				}
+				throw new Error('No content returned from filesDownload');
+			} catch (err) {
+				console.error(`[DropboxStorage.readFile] error reading ${path}:`, err);
+				throw err;
 			}
-			if (result.fileBlob) {
-				return new Uint8Array(await result.fileBlob.arrayBuffer());
-			}
-			throw new Error('No content returned from filesDownload');
 		});
 	}
 
@@ -262,40 +274,38 @@ export class DropboxStorage implements StorageBackend {
 	 */
 	writeFile(path: string, content: Uint8Array, options?: WriteOptions): StorageOperation<void> {
 		return new BaseStorageOperation(async (signal) => {
-			if (options?.atomic) {
-				const tempPath = `${path}.tmp`;
-				await this.client.filesUpload(
-					{
-						path: tempPath,
-						contents: content,
-						mode: { '.tag': 'overwrite' },
-						mute: true
-					},
-					{ signal }
-				);
-
-				try {
-					await this.client.filesDeleteV2({ path });
-				} catch (err) {
-					if (!isNotFoundError(err)) {
-						throw err;
-					}
+			try {
+				if (options?.atomic) {
+					const tempPath = `${path}.tmp`;
+					console.log(`[DropboxStorage.writeFile] uploading to temp: ${tempPath}`);
+					await this.client.filesUpload(
+						{
+							path: tempPath,
+							contents: content,
+							mode: { '.tag': 'overwrite' },
+							mute: true
+						},
+						{ signal }
+					);
+					console.log(`[DropboxStorage.writeFile] upload complete: ${tempPath}`);
+					// renameFile handles deletion of destination for atomicity
+					await this.renameFile(tempPath, path);
+				} else {
+					console.log(`[DropboxStorage.writeFile] uploading directly to: ${path}`);
+					await this.client.filesUpload(
+						{
+							path,
+							contents: content,
+							mode: { '.tag': 'overwrite' },
+							mute: true
+						},
+						{ signal }
+					);
+					console.log(`[DropboxStorage.writeFile] upload complete: ${path}`);
 				}
-
-				await this.client.filesMoveV2({
-					from_path: tempPath,
-					to_path: path
-				});
-			} else {
-				await this.client.filesUpload(
-					{
-						path,
-						contents: content,
-						mode: { '.tag': 'overwrite' },
-						mute: true
-					},
-					{ signal }
-				);
+			} catch (err) {
+				console.error(`[DropboxStorage.writeFile] error writing ${path}:`, err);
+				throw err;
 			}
 		});
 	}
@@ -310,6 +320,7 @@ export class DropboxStorage implements StorageBackend {
 			await this.client.filesDeleteV2({ path });
 		} catch (err) {
 			if (!isNotFoundError(err)) {
+				console.error(`[DropboxStorage.deleteFile] error deleting ${path}:`, err);
 				throw err;
 			}
 		}
@@ -323,46 +334,73 @@ export class DropboxStorage implements StorageBackend {
 	 * @returns An array of child metadata entries.
 	 */
 	async listDirectory(path: string): Promise<StorageFileInfo[]> {
+		// Dropbox requires empty string for root in filesListFolder
 		const formatPath = path === '/' ? '' : path;
+		console.log(
+			`[DropboxStorage.listDirectory] listing path: "${path}", sending to API: "${formatPath}"`
+		);
 
-		const fetchEntries = async (cursor?: string): Promise<any[]> => {
-			const response = cursor
-				? await this.client.filesListFolderContinue({ cursor })
-				: await this.client.filesListFolder({ path: formatPath });
+		try {
+			const fetchEntries = async (cursor?: string): Promise<any[]> => {
+				const response = cursor
+					? await this.client.filesListFolderContinue({ cursor })
+					: await this.client.filesListFolder({ path: formatPath });
 
-			const { entries, has_more, cursor: nextCursor } = response.result;
+				const { entries, has_more, cursor: nextCursor } = response.result;
 
-			if (has_more) {
-				const nextEntries = await fetchEntries(nextCursor);
-				return [...entries, ...nextEntries];
-			}
+				if (has_more) {
+					const nextEntries = await fetchEntries(nextCursor);
+					return [...entries, ...nextEntries];
+				}
 
-			return entries;
-		};
-
-		const entries = await fetchEntries();
-
-		return entries.map((entry: any) => {
-			const type = entry['.tag'] === 'folder' ? 'directory' : 'file';
-			return {
-				path: entry.path_display || entry.path_lower || '',
-				name: entry.name,
-				type,
-				size: type === 'file' ? entry.size : 0,
-				modifiedAt:
-					type === 'file' && entry.server_modified ? new Date(entry.server_modified) : new Date(0),
-				etag: type === 'file' ? entry.rev : undefined
+				return entries;
 			};
-		});
+
+			const entries = await fetchEntries();
+
+			return entries.map((entry: any) => {
+				const type = entry['.tag'] === 'folder' ? 'directory' : 'file';
+				return {
+					path: entry.path_display || entry.path_lower || '',
+					name: entry.name,
+					type,
+					size: type === 'file' ? entry.size : 0,
+					modifiedAt:
+						type === 'file' && entry.server_modified
+							? new Date(entry.server_modified)
+							: new Date(0),
+					etag: type === 'file' ? entry.rev : undefined
+				};
+			});
+		} catch (err) {
+			const status = (err as any)?.status;
+			const errorSummary = (err as any)?.error?.error_summary || '';
+			console.error(
+				`[DropboxStorage.listDirectory] error listing ${path}: HTTP ${status} - ${errorSummary}`,
+				err
+			);
+			throw err;
+		}
 	}
 
 	/**
 	 * Renames or moves a file or directory to a new path.
+	 * Deletes the destination first to ensure atomicity, then retries move on 409 to handle Dropbox eventual consistency.
 	 *
 	 * @param oldPath The original path.
 	 * @param newPath The target destination path.
 	 */
 	async renameFile(oldPath: string, newPath: string): Promise<void> {
+		// Delete destination if it exists to ensure atomic move
+		try {
+			await this.client.filesDeleteV2({ path: newPath });
+		} catch (err) {
+			if (!isNotFoundError(err)) {
+				throw err;
+			}
+		}
+
+		// Move temp file to final destination
 		await this.client.filesMoveV2({
 			from_path: oldPath,
 			to_path: newPath
