@@ -297,3 +297,63 @@ test('GithubStorage listDirectory handles empty repository', async () => {
 	const items = await storage.listDirectory('/');
 	assert.deepStrictEqual(items, []);
 });
+
+test('GithubStorage getConfigHash and native auth EventTarget events', async () => {
+	const storage = new GithubStorage({
+		owner: 'TestOwner',
+		repo: 'TestRepo',
+		credentials: { accessToken: 'token123' }
+	});
+
+	assert.strictEqual(storage.getConfigHash(), 'github:TestOwner/TestRepo');
+
+	let reauthFired = false;
+	const handler = (e: Event) => {
+		reauthFired = true;
+		assert.strictEqual((e as CustomEvent).detail.reason, 'unauthorised');
+	};
+	storage.addEventListener('reauthrequired', handler);
+
+	// Mock a 401 response from fetch
+	const originalMockFetch = (globalThis as any).fetch;
+	(globalThis as any).fetch = async () => {
+		return {
+			status: 401,
+			ok: false,
+			statusText: 'Unauthorized',
+			headers: new Headers()
+		} as any;
+	};
+
+	try {
+		await storage.stat('/notes/anything.md');
+	} catch {
+		// ignored
+	}
+
+	assert.strictEqual(reauthFired, true);
+	(globalThis as any).fetch = originalMockFetch;
+	storage.removeEventListener('reauthrequired', handler);
+});
+
+test('GithubStorage setCredentials dispatches tokenrenewed event', async () => {
+	const storage = new GithubStorage({
+		owner: 'TestOwner',
+		repo: 'TestRepo'
+	});
+	let renewedDetail: any = null;
+	const handler = (e: Event) => {
+		renewedDetail = (e as CustomEvent).detail;
+	};
+	storage.addEventListener('tokenrenewed', handler);
+
+	storage.setCredentials({ accessToken: 'ghp_newtoken' });
+	assert.ok(renewedDetail);
+	assert.strictEqual(renewedDetail.accessToken, 'ghp_newtoken');
+	assert.strictEqual(renewedDetail.owner, 'TestOwner');
+	assert.strictEqual(renewedDetail.repo, 'TestRepo');
+
+	storage.removeEventListener('tokenrenewed', handler);
+});
+
+

@@ -54,7 +54,7 @@ function uint8ArrayToBase64(arr: Uint8Array): string {
  * StorageBackend implementation for GitHub, running exclusively on the client side.
  * Authenticates using a Personal Access Token (PAT) or fine-grained token.
  */
-export class GithubStorage implements StorageBackend {
+export class GithubStorage extends EventTarget implements StorageBackend {
 	readonly id = 'github';
 	private owner: string;
 	private repo: string;
@@ -62,12 +62,20 @@ export class GithubStorage implements StorageBackend {
 	private accessToken?: string;
 
 	constructor(options: GithubStorageOptions) {
+		super();
 		this.owner = options.owner;
 		this.repo = options.repo;
 		this.branch = options.branch || 'main';
 		if (options.credentials) {
 			this.setCredentials(options.credentials);
 		}
+	}
+
+	/**
+	 * Returns the configuration hash identifier for GitHub credential storage.
+	 */
+	getConfigHash(): string {
+		return `github:${this.owner}/${this.repo}`;
 	}
 
 	/**
@@ -97,6 +105,9 @@ export class GithubStorage implements StorageBackend {
 		if (credentials.owner) this.owner = credentials.owner;
 		if (credentials.repo) this.repo = credentials.repo;
 		if (credentials.branch) this.branch = credentials.branch;
+		if (this.accessToken) {
+			this.dispatchEvent(new CustomEvent('tokenrenewed', { detail: this.getCredentials() }));
+		}
 	}
 
 	/**
@@ -105,7 +116,6 @@ export class GithubStorage implements StorageBackend {
 	async disconnect(): Promise<void> {
 		this.accessToken = undefined;
 	}
-
 
 	/**
 	 * Helper to generate default GitHub API headers.
@@ -119,6 +129,18 @@ export class GithubStorage implements StorageBackend {
 			headers['Authorization'] = `Bearer ${this.accessToken}`;
 		}
 		return headers;
+	}
+
+	/**
+	 * Performs a fetch request and emits 'reauthrequired' if GitHub returns 401 or auth 403.
+	 */
+	private async fetchWithAuth(url: string, init: RequestInit = {}): Promise<Response> {
+		const headers = { ...this.getHeaders(), ...(init.headers || {}) };
+		const res = await fetch(url, { ...init, headers });
+		if (res.status === 401 || (res.status === 403 && res.headers.get('x-ratelimit-remaining') !== '0')) {
+			this.dispatchEvent(new CustomEvent('reauthrequired', { detail: { reason: 'unauthorised' } }));
+		}
+		return res;
 	}
 
 	/**
@@ -138,9 +160,7 @@ export class GithubStorage implements StorageBackend {
 
 		try {
 			const url = `https://api.github.com/repos/${this.owner}/${this.repo}/contents/${clean}?ref=${this.branch}`;
-			const res = await fetch(url, {
-				headers: this.getHeaders()
-			});
+			const res = await this.fetchWithAuth(url);
 
 			if (res.status === 404) {
 				return null;
@@ -166,9 +186,7 @@ export class GithubStorage implements StorageBackend {
 			let modifiedAt = new Date(0);
 			try {
 				const commitsUrl = `https://api.github.com/repos/${this.owner}/${this.repo}/commits?path=${clean}&sha=${this.branch}&per_page=1`;
-				const commitsRes = await fetch(commitsUrl, {
-					headers: this.getHeaders()
-				});
+				const commitsRes = await this.fetchWithAuth(commitsUrl);
 				if (commitsRes.ok) {
 					const commits = await commitsRes.json();
 					if (commits && commits[0]?.commit?.committer?.date) {
@@ -203,7 +221,7 @@ export class GithubStorage implements StorageBackend {
 			const headers = this.getHeaders() as Record<string, string>;
 			headers['Accept'] = 'application/vnd.github.v3.raw';
 
-			const res = await fetch(url, {
+			const res = await this.fetchWithAuth(url, {
 				headers,
 				signal
 			});
@@ -262,9 +280,8 @@ export class GithubStorage implements StorageBackend {
 				}
 
 				const url = `https://api.github.com/repos/${this.owner}/${this.repo}/contents/${clean}`;
-				const res = await fetch(url, {
+				const res = await this.fetchWithAuth(url, {
 					method: 'PUT',
-					headers: this.getHeaders(),
 					body: JSON.stringify(body),
 					signal
 				});
@@ -311,9 +328,8 @@ export class GithubStorage implements StorageBackend {
 		};
 
 		const url = `https://api.github.com/repos/${this.owner}/${this.repo}/contents/${clean}`;
-		const res = await fetch(url, {
+		const res = await this.fetchWithAuth(url, {
 			method: 'DELETE',
-			headers: this.getHeaders(),
 			body: JSON.stringify(body)
 		});
 
@@ -330,9 +346,7 @@ export class GithubStorage implements StorageBackend {
 		const clean = cleanPath(path);
 		const url = `https://api.github.com/repos/${this.owner}/${this.repo}/contents/${clean}?ref=${this.branch}`;
 
-		const res = await fetch(url, {
-			headers: this.getHeaders()
-		});
+		const res = await this.fetchWithAuth(url);
 
 		if (res.status === 404) {
 			try {

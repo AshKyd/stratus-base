@@ -39,5 +39,10 @@ export { JS7Z_WASM_URL } from './utils/codec7z.ts';
 export { MemoryStorage } from './backends/MemoryStorage.ts';
 
 export { generateSecurePassword } from './utils/crypto.ts';
-
-
+export {
+	STRATUS_CREDENTIALS_KEY,
+	loadCredentials,
+	saveCredentials,
+	clearCredentials
+} from './utils/CredentialManager.ts';
+export type { StoredSession } from './utils/CredentialManager.ts';

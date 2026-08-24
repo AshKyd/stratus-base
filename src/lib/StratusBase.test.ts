@@ -94,7 +94,7 @@ class MockStorageManager {
 	}
 }
 
-class MockBackend implements StorageBackend {
+class MockBackend extends EventTarget implements StorageBackend {
 	id = 'mock';
 	async isConfigured() { return true; }
 	async stat() { return null; }
@@ -382,15 +382,26 @@ test('StratusBase sync queueing and coalescing', async (t) => {
 	assert.strictEqual(syncStartCount, 2);
 });
 
-test('StratusBase secure storage reset', async (t) => {
+test('StratusBase secure storage logout and reset', async (t) => {
 	const storageMock = new MockStorageManager();
 	setStorageManager(storageMock);
+
+	const mockLocalStorage = {
+		store: new Map<string, string>(),
+		getItem(key: string) { return this.store.get(key) ?? null; },
+		setItem(key: string, val: string) { this.store.set(key, val); },
+		removeItem(key: string) { this.store.delete(key); },
+		clear() { this.store.clear(); }
+	};
+	(globalThis as any).window = { localStorage: mockLocalStorage };
 
 	let disconnected = false;
 	const backend = new MockBackend();
 	(backend as any).disconnect = async () => {
 		disconnected = true;
 	};
+	(backend as any).getConfigHash = () => 'mock:client1';
+	(backend as any).getCredentials = () => ({ accessToken: 'secret-123' });
 
 	const stratus = new StratusBase({
 		backend,
@@ -403,16 +414,111 @@ test('StratusBase secure storage reset', async (t) => {
 	const statBefore = await stratus.stat('/hello.txt');
 	assert.ok(statBefore !== null);
 
-	// Perform reset
-	await stratus.reset();
+	// Verify credentials were saved to localStorage
+	assert.ok(mockLocalStorage.getItem('stratus_credentials'));
+
+	// Perform logout
+	await stratus.logout();
 
 	// Check backend disconnect was called
 	assert.strictEqual(disconnected, true);
 
+	// Check credentials cleared from localStorage
+	assert.strictEqual(mockLocalStorage.getItem('stratus_credentials'), null);
+
 	// Check files are deleted and no longer exist in OPFS
 	const statAfter = await stratus.stat('/hello.txt');
 	assert.strictEqual(statAfter, null);
+
+	delete (globalThis as any).window;
 });
+
+test('StratusBase auto-restores credentials from localStorage and dispatches reauthrequired', async () => {
+	const mockLocalStorage = {
+		store: new Map<string, string>(),
+		getItem(key: string) { return this.store.get(key) ?? null; },
+		setItem(key: string, val: string) { this.store.set(key, val); },
+		removeItem(key: string) { this.store.delete(key); },
+		clear() { this.store.clear(); }
+	};
+	(globalThis as any).window = { localStorage: mockLocalStorage };
+
+	// Pre-populate localStorage with credentials for 'google-drive:clientA'
+	mockLocalStorage.setItem(
+		'stratus_credentials',
+		JSON.stringify({
+			configHash: 'google-drive:clientA',
+			credentials: { accessToken: 'saved-token', refreshToken: 'saved-refresh' }
+		})
+	);
+
+	let backendCreds: any = {};
+
+	class MockAuthBackend extends EventTarget implements Partial<StorageBackend> {
+		id = 'google-drive';
+		getConfigHash() { return 'google-drive:clientA'; }
+		getCredentials() { return backendCreds; }
+		setCredentials(creds: any) { backendCreds = creds; }
+		async isConfigured() { return true; }
+		async stat() { return null; }
+		async getAuthUrl(redirectUri: string) { return `https://auth.example.com?redirect=${redirectUri}`; }
+	}
+
+	const authBackend = new MockAuthBackend() as any;
+
+	const stratus = new StratusBase({
+		backend: authBackend,
+		localRoot: '/app',
+		middleware: mockMiddleware
+	});
+
+	// Credentials should have been restored into backend
+	assert.strictEqual(backendCreds.accessToken, 'saved-token');
+	assert.strictEqual(backendCreds.refreshToken, 'saved-refresh');
+	assert.strictEqual(stratus.getConfigHash(), 'google-drive:clientA');
+	assert.strictEqual(await stratus.getAuthUrl('http://localhost'), 'https://auth.example.com?redirect=http://localhost');
+
+	// Test reauthrequired event propagation
+	let reauthDetail: any = null;
+	stratus.addEventListener('reauthrequired', (e: any) => {
+		reauthDetail = e.detail;
+	});
+
+	authBackend.dispatchEvent(new CustomEvent('reauthrequired', { detail: { reason: 'unauthorised' } }));
+	assert.ok(reauthDetail);
+	assert.strictEqual(reauthDetail.backend, 'google-drive');
+	assert.strictEqual(reauthDetail.reason, 'unauthorised');
+
+	// Test client.setCredentials triggers authrenewed and saves to localStorage
+	let authRenewedDetail: any = null;
+	stratus.addEventListener('authrenewed', (e: any) => {
+		authRenewedDetail = e.detail;
+	});
+
+	// Trigger token renewed from backend (or via setCredentials)
+	authBackend.dispatchEvent(new CustomEvent('tokenrenewed', { detail: { accessToken: 'newer-token', refreshToken: 'newer-refresh' } }));
+	assert.ok(authRenewedDetail);
+	assert.strictEqual(authRenewedDetail.accessToken, 'newer-token');
+	const storedAfterRenew = JSON.parse(mockLocalStorage.getItem('stratus_credentials')!);
+	assert.strictEqual(storedAfterRenew.credentials.accessToken, 'newer-token');
+
+	// Test client.setCredentials passthrough
+	stratus.setCredentials({ accessToken: 'manual-token' });
+	assert.strictEqual(backendCreds.accessToken, 'manual-token');
+
+	// Test non-OAuth backend errors on getAuthUrl and exchangeCode
+	const nonOAuthBackend = new MockBackend();
+	const nonOAuthClient = new StratusBase({ backend: nonOAuthBackend, localRoot: '/app', middleware: mockMiddleware });
+	await assert.rejects(async () => {
+		await nonOAuthClient.getAuthUrl('http://localhost');
+	}, /does not support OAuth authentication/);
+	await assert.rejects(async () => {
+		await nonOAuthClient.exchangeCode('code', 'http://localhost');
+	}, /does not support OAuth code exchange/);
+
+	delete (globalThis as any).window;
+});
+
 
 test('StratusBase remote lockfile concurrency control', async (t) => {
 	const storageMock = new MockStorageManager();
@@ -519,6 +625,31 @@ test('StratusBase isSetUp delegates to middleware', async () => {
 	assert.strictEqual(result, true);
 	assert.strictEqual(isSetUpCalledWithContext, true);
 });
+
+test('StratusBase isConfigured delegates to backend.isConfigured', async () => {
+	let backendConfigured = false;
+	class CustomMockBackend extends EventTarget {
+		id = 'mock';
+		async isConfigured() {
+			return backendConfigured;
+		}
+		async stat() {
+			return null;
+		}
+	}
+	const backend: any = new CustomMockBackend();
+
+	const stratus = new StratusBase({
+		backend,
+		localRoot: '/app',
+		middleware: mockMiddleware
+	});
+
+	assert.strictEqual(await stratus.isConfigured(), false);
+	backendConfigured = true;
+	assert.strictEqual(await stratus.isConfigured(), true);
+});
+
 
 
 

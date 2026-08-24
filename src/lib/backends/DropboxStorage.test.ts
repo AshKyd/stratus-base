@@ -18,12 +18,16 @@ const mockStorage: Record<string, string> = {};
 } as any;
 
 // Mock DropboxAuth prototype methods
-DropboxAuth.prototype.getAccessToken = () => 'mock-access-token';
-DropboxAuth.prototype.getAccessTokenExpiresAt = () => new Date(Date.now() + 60000);
-DropboxAuth.prototype.getRefreshToken = () => 'mock-refresh-token';
-DropboxAuth.prototype.setAccessToken = () => {};
-DropboxAuth.prototype.setRefreshToken = () => {};
-DropboxAuth.prototype.setAccessTokenExpiresAt = () => {};
+let mockAuthAccessToken = 'mock-access-token';
+let mockAuthRefreshToken = 'mock-refresh-token';
+let mockAuthExpiresAt: Date | undefined = new Date(Date.now() + 60000);
+
+DropboxAuth.prototype.getAccessToken = () => mockAuthAccessToken;
+DropboxAuth.prototype.getAccessTokenExpiresAt = () => mockAuthExpiresAt;
+DropboxAuth.prototype.getRefreshToken = () => mockAuthRefreshToken;
+DropboxAuth.prototype.setAccessToken = (token: string) => { mockAuthAccessToken = token; };
+DropboxAuth.prototype.setRefreshToken = (token: string) => { mockAuthRefreshToken = token; };
+DropboxAuth.prototype.setAccessTokenExpiresAt = (date: any) => { mockAuthExpiresAt = date; };
 DropboxAuth.prototype.getCodeVerifier = () => 'mock-code-verifier';
 DropboxAuth.prototype.setCodeVerifier = () => {};
 DropboxAuth.prototype.getAuthenticationUrl = async () => 'https://auth.dropbox.com/mock';
@@ -54,6 +58,11 @@ let lastMovedTo = '';
 	options: any
 ): Promise<any> {
 	if (path === 'files/get_metadata') {
+		if (args.path === '/auth-error') {
+			const err: any = new Error('Unauthorized');
+			err.status = 401;
+			throw err;
+		}
 		if (args.path === '/not-found') {
 			const err = new Error('Not found') as any;
 			err.status = 409;
@@ -191,3 +200,42 @@ test('DropboxStorage listDirectory retrieves list of items', async () => {
 	assert.strictEqual(items[0].type, 'file');
 	assert.strictEqual(items[0].size, 100);
 });
+
+test('DropboxStorage getConfigHash and native auth EventTarget events', async () => {
+	const storage = new DropboxStorage({ clientId: 'mock-client' });
+	assert.strictEqual(storage.getConfigHash(), 'dropbox:mock-client');
+
+	let reauthFired = false;
+	const handler = (e: Event) => {
+		reauthFired = true;
+		assert.strictEqual((e as CustomEvent).detail.reason, 'unauthorised');
+	};
+	storage.addEventListener('reauthrequired', handler);
+
+	try {
+		await storage.stat('/auth-error');
+	} catch {
+		// ignored
+	}
+
+	assert.strictEqual(reauthFired, true);
+	storage.removeEventListener('reauthrequired', handler);
+});
+
+test('DropboxStorage setCredentials dispatches tokenrenewed event', async () => {
+	const storage = new DropboxStorage({ clientId: 'mock-client' });
+	let renewedDetail: any = null;
+	const handler = (e: Event) => {
+		renewedDetail = (e as CustomEvent).detail;
+	};
+	storage.addEventListener('tokenrenewed', handler);
+
+	storage.setCredentials({ accessToken: 'new-token', refreshToken: 'new-refresh' });
+	assert.ok(renewedDetail);
+	assert.strictEqual(renewedDetail.accessToken, 'new-token');
+	assert.strictEqual(renewedDetail.refreshToken, 'new-refresh');
+
+	storage.removeEventListener('tokenrenewed', handler);
+});
+
+

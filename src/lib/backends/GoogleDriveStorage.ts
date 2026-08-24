@@ -91,7 +91,7 @@ const DEFAULT_EXPIRY_WARNING_MS = 10 * 60 * 1000;
  * StorageBackend implementation for Google Drive, running exclusively on the client side.
  * Supports OAuth 2.0 with PKCE authorization and files CRUD.
  */
-export class GoogleDriveStorage implements StorageBackend {
+export class GoogleDriveStorage extends EventTarget implements StorageBackend {
 	readonly id = 'google-drive';
 	private clientId: string;
 	private accessToken?: string;
@@ -105,19 +105,37 @@ export class GoogleDriveStorage implements StorageBackend {
 	// Local cache mapping paths to Google Drive file IDs
 	private pathIdCache = new Map<string, string>();
 
-	private listeners = new Map<GoogleAuthEvent, Set<(payload: never) => void>>();
 	private expiryTimer?: ReturnType<typeof setTimeout>;
 
 	// Coalesces concurrent renewal attempts into a single popup.
 	private renewalPromise?: Promise<StorageAuthCredentials>;
 
 	constructor(options: GoogleDriveStorageOptions) {
+		super();
 		this.clientId = options.clientId;
 		this.folderName = options.folderName;
 		this.redirectUri = options.redirectUri;
 		this.expiryWarningMs = options.expiryWarningMs ?? DEFAULT_EXPIRY_WARNING_MS;
 		if (options.credentials) {
 			this.setCredentials(options.credentials);
+		}
+	}
+
+	/**
+	 * Returns the configuration hash identifier for Google Drive credential storage.
+	 */
+	getConfigHash(): string {
+		return `google-drive:${this.clientId}`;
+	}
+
+	/**
+	 * Helper to dispatch both kebab-case and normalised native CustomEvents.
+	 */
+	private emit<E extends GoogleAuthEvent>(event: E, payload: GoogleAuthEventPayloads[E]): void {
+		const normalized = event.replace(/-/g, '');
+		this.dispatchEvent(new CustomEvent(normalized, { detail: payload }));
+		if (normalized !== event) {
+			this.dispatchEvent(new CustomEvent(event, { detail: payload }));
 		}
 	}
 
@@ -130,26 +148,11 @@ export class GoogleDriveStorage implements StorageBackend {
 		event: E,
 		callback: (payload: GoogleAuthEventPayloads[E]) => void
 	): () => void {
-		const existing = this.listeners.get(event) ?? new Set();
-		existing.add(callback as (payload: never) => void);
-		this.listeners.set(event, existing);
-		return () => this.off(event, callback);
-	}
-
-	/**
-	 * Removes a previously registered event listener.
-	 */
-	off<E extends GoogleAuthEvent>(
-		event: E,
-		callback: (payload: GoogleAuthEventPayloads[E]) => void
-	): void {
-		this.listeners.get(event)?.delete(callback as (payload: never) => void);
-	}
-
-	private emit<E extends GoogleAuthEvent>(event: E, payload: GoogleAuthEventPayloads[E]): void {
-		this.listeners.get(event)?.forEach((callback) => {
-			(callback as (payload: GoogleAuthEventPayloads[E]) => void)(payload);
-		});
+		const handler = (e: Event) => callback((e as CustomEvent).detail);
+		this.addEventListener(event, handler);
+		return () => {
+			this.removeEventListener(event, handler);
+		};
 	}
 
 	/**
@@ -375,6 +378,9 @@ export class GoogleDriveStorage implements StorageBackend {
 		this.refreshToken = credentials.refreshToken;
 		this.expiresAt = credentials.expiresAt;
 		this.scheduleExpiryWarning();
+		if (this.accessToken) {
+			this.emit('token-renewed', this.getCredentials());
+		}
 	}
 
 	/**

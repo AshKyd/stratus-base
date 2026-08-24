@@ -5,7 +5,7 @@ import { BaseStorageOperation } from '../utils/BaseStorageOperation.ts';
  * StorageBackend implementation that stores files entirely in memory.
  * Useful for testing and offline scenarios, requiring no setup or API keys.
  */
-export class MemoryStorage implements StorageBackend {
+export class MemoryStorage extends EventTarget implements StorageBackend {
 	readonly id = 'memory';
 	private files = new Map<string, { content: Uint8Array; modifiedAt: Date; etag?: string }>();
 	readonly atomicWritesTracked: string[] = [];

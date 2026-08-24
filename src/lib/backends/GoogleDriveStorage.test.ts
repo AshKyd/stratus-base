@@ -69,8 +69,12 @@ let deleteCalledWithId = '';
 let patchCalledWithId = '';
 let lastPatchBody: any = null;
 let lastCreateBody: any = null;
+let fetchResponseOverride: Response | null = null;
 
 globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+	if (fetchResponseOverride) {
+		return fetchResponseOverride;
+	}
 	const urlStr = typeof input === 'string' ? input : input.toString();
 	fetchCalls.push({ url: urlStr, options: init });
 
@@ -293,3 +297,44 @@ test('GoogleDriveStorage renameFile patches name and parents', async () => {
 	assert.ok(renameCall);
 	assert.strictEqual(JSON.parse(renameCall.options?.body as string).name, 'todo-new.md');
 });
+
+test('GoogleDriveStorage getConfigHash and native auth EventTarget events', async () => {
+	const storage = new GoogleDriveStorage({ clientId: 'mock-google-client' });
+	assert.strictEqual(storage.getConfigHash(), 'google-drive:mock-google-client');
+
+	let reauthFired = false;
+	const handler = (e: Event) => {
+		reauthFired = true;
+	};
+	storage.addEventListener('reauthrequired', handler);
+
+	// Trigger 401 response
+	fetchResponseOverride = createMockResponse('Unauthorized', { status: 401, statusText: 'Unauthorized' });
+	try {
+		await storage.stat('/notes/todo.md');
+	} catch {
+		// ignored
+	}
+	fetchResponseOverride = null;
+
+	assert.strictEqual(reauthFired, true);
+	storage.removeEventListener('reauthrequired', handler);
+});
+
+test('GoogleDriveStorage setCredentials dispatches tokenrenewed event', async () => {
+	const storage = new GoogleDriveStorage({ clientId: 'mock-google-client' });
+	let renewedDetail: any = null;
+	const handler = (e: Event) => {
+		renewedDetail = (e as CustomEvent).detail;
+	};
+	storage.addEventListener('tokenrenewed', handler);
+
+	storage.setCredentials({ accessToken: 'google-token', refreshToken: 'google-refresh' });
+	assert.ok(renewedDetail);
+	assert.strictEqual(renewedDetail.accessToken, 'google-token');
+	assert.strictEqual(renewedDetail.refreshToken, 'google-refresh');
+
+	storage.removeEventListener('tokenrenewed', handler);
+});
+
+

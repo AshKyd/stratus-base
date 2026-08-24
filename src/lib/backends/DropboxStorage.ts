@@ -21,7 +21,6 @@ function isNotFoundError(err: any): boolean {
 	if (!err) return false;
 	if (err.status === 404) return true;
 
-	// Recursively check if any '.tag' field equals 'not_found' in the error object
 	const hasNotFoundTag = (obj: any): boolean => {
 		if (!obj || typeof obj !== 'object') return false;
 		if (obj['.tag'] === 'not_found') return true;
@@ -32,6 +31,16 @@ function isNotFoundError(err: any): boolean {
 	};
 
 	return hasNotFoundTag(err.error || err);
+}
+
+function isAuthError(err: any): boolean {
+	if (!err) return false;
+	if (err.status === 401) return true;
+	const tag = err.error?.['.tag'] || err['.tag'] || (err.error && typeof err.error === 'string' ? err.error : '');
+	if (tag === 'invalid_access_token' || tag === 'expired_access_token') return true;
+	const summary = (err.error?.error_summary || err.error_summary || '') as string;
+	if (summary.includes('invalid_access_token') || summary.includes('expired_access_token')) return true;
+	return false;
 }
 
 /**
@@ -52,8 +61,9 @@ export interface DropboxStorageOptions {
  * StorageBackend implementation for Dropbox, running exclusively on the client side.
  * Supports OAuth 2.0 with PKCE authorization and files CRUD.
  */
-export class DropboxStorage implements StorageBackend {
+export class DropboxStorage extends EventTarget implements StorageBackend {
 	readonly id = 'dropbox';
+	private clientId: string;
 	private auth: DropboxAuth;
 	private client: Dropbox;
 
@@ -63,6 +73,8 @@ export class DropboxStorage implements StorageBackend {
 	 * @param options Initialization options, including the clientId.
 	 */
 	constructor(options: DropboxStorageOptions) {
+		super();
+		this.clientId = options.clientId;
 		this.auth = new DropboxAuth({
 			clientId: options.clientId
 		});
@@ -72,6 +84,13 @@ export class DropboxStorage implements StorageBackend {
 		this.client = new Dropbox({
 			auth: this.auth
 		});
+	}
+
+	/**
+	 * Returns the configuration hash identifier for Dropbox credential storage.
+	 */
+	getConfigHash(): string {
+		return `dropbox:${this.clientId}`;
 	}
 
 	/**
@@ -92,8 +111,16 @@ export class DropboxStorage implements StorageBackend {
 		if (refreshToken) {
 			try {
 				await this.auth.refreshAccessToken();
+				this.dispatchEvent(new CustomEvent('tokenrenewed', { detail: this.getCredentials() }));
 				return true;
-			} catch {
+			} catch (err) {
+				if (isAuthError(err)) {
+					this.dispatchEvent(
+						new CustomEvent('reauthrequired', {
+							detail: { reason: 'unauthorised', error: err }
+						})
+					);
+				}
 				return false;
 			}
 		}
@@ -163,6 +190,13 @@ export class DropboxStorage implements StorageBackend {
 			return credentials;
 		} catch (err) {
 			console.error('[DropboxStorage.exchangeCode] error:', err);
+			if (isAuthError(err)) {
+				this.dispatchEvent(
+					new CustomEvent('reauthrequired', {
+						detail: { reason: 'unauthorised', error: err }
+					})
+				);
+			}
 			throw err;
 		}
 	}
@@ -196,6 +230,9 @@ export class DropboxStorage implements StorageBackend {
 		}
 		if (credentials.expiresAt) {
 			this.auth.setAccessTokenExpiresAt(new Date(credentials.expiresAt));
+		}
+		if (credentials.accessToken) {
+			this.dispatchEvent(new CustomEvent('tokenrenewed', { detail: this.getCredentials() }));
 		}
 	}
 
@@ -233,6 +270,13 @@ export class DropboxStorage implements StorageBackend {
 			if (isNotFoundError(err)) {
 				return null;
 			}
+			if (isAuthError(err)) {
+				this.dispatchEvent(
+					new CustomEvent('reauthrequired', {
+						detail: { reason: 'unauthorised', error: err }
+					})
+				);
+			}
 			console.error(`[DropboxStorage.stat] error getting metadata for ${path}:`, err);
 			throw err;
 		}
@@ -257,6 +301,13 @@ export class DropboxStorage implements StorageBackend {
 				}
 				throw new Error('No content returned from filesDownload');
 			} catch (err) {
+				if (isAuthError(err)) {
+					this.dispatchEvent(
+						new CustomEvent('reauthrequired', {
+							detail: { reason: 'unauthorised', error: err }
+						})
+					);
+				}
 				console.error(`[DropboxStorage.readFile] error reading ${path}:`, err);
 				throw err;
 			}
@@ -304,6 +355,13 @@ export class DropboxStorage implements StorageBackend {
 					console.log(`[DropboxStorage.writeFile] upload complete: ${path}`);
 				}
 			} catch (err) {
+				if (isAuthError(err)) {
+					this.dispatchEvent(
+						new CustomEvent('reauthrequired', {
+							detail: { reason: 'unauthorised', error: err }
+						})
+					);
+				}
 				console.error(`[DropboxStorage.writeFile] error writing ${path}:`, err);
 				throw err;
 			}
@@ -319,6 +377,13 @@ export class DropboxStorage implements StorageBackend {
 		try {
 			await this.client.filesDeleteV2({ path });
 		} catch (err) {
+			if (isAuthError(err)) {
+				this.dispatchEvent(
+					new CustomEvent('reauthrequired', {
+						detail: { reason: 'unauthorised', error: err }
+					})
+				);
+			}
 			if (!isNotFoundError(err)) {
 				console.error(`[DropboxStorage.deleteFile] error deleting ${path}:`, err);
 				throw err;
@@ -373,6 +438,13 @@ export class DropboxStorage implements StorageBackend {
 				};
 			});
 		} catch (err) {
+			if (isAuthError(err)) {
+				this.dispatchEvent(
+					new CustomEvent('reauthrequired', {
+						detail: { reason: 'unauthorised', error: err }
+					})
+				);
+			}
 			const status = (err as any)?.status;
 			const errorSummary = (err as any)?.error?.error_summary || '';
 			console.error(
@@ -395,15 +467,33 @@ export class DropboxStorage implements StorageBackend {
 		try {
 			await this.client.filesDeleteV2({ path: newPath });
 		} catch (err) {
+			if (isAuthError(err)) {
+				this.dispatchEvent(
+					new CustomEvent('reauthrequired', {
+						detail: { reason: 'unauthorised', error: err }
+					})
+				);
+			}
 			if (!isNotFoundError(err)) {
 				throw err;
 			}
 		}
 
 		// Move temp file to final destination
-		await this.client.filesMoveV2({
-			from_path: oldPath,
-			to_path: newPath
-		});
+		try {
+			await this.client.filesMoveV2({
+				from_path: oldPath,
+				to_path: newPath
+			});
+		} catch (err) {
+			if (isAuthError(err)) {
+				this.dispatchEvent(
+					new CustomEvent('reauthrequired', {
+						detail: { reason: 'unauthorised', error: err }
+					})
+				);
+			}
+			throw err;
+		}
 	}
 }

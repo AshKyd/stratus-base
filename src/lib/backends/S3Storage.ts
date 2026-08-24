@@ -49,7 +49,7 @@ export interface S3StorageOptions {
  * StorageBackend implementation for AWS S3 and S3-compatible APIs.
  * Supports standard CRUD operations and custom endpoints.
  */
-export class S3Storage implements StorageBackend {
+export class S3Storage extends EventTarget implements StorageBackend {
 	readonly id = 's3';
 	private options: S3StorageOptions;
 	private client: S3Client;
@@ -60,6 +60,7 @@ export class S3Storage implements StorageBackend {
 	 * @param options The configuration options for S3 storage.
 	 */
 	constructor(options: S3StorageOptions) {
+		super();
 		this.options = options;
 		this.client = new S3Client({
 			region: options.region,

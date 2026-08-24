@@ -43,13 +43,20 @@ export interface WriteOptions {
 	atomic?: boolean;
 }
 
-export interface StorageBackend {
+export interface StorageBackend extends EventTarget {
 	/**
 	 * The unique identifier for this backend type (e.g., 'google-drive', 's3')
 	 */
 	readonly id: string;
 
 	// --- Authentication & Configuration ---
+
+	/**
+	 * Returns a unique configuration hash string (e.g., 'dropbox:my-client-id') used by
+	 * StratusBase to match and automatically persist/restore credentials in localStorage.
+	 * Returns undefined for backends that do not persist credentials (e.g., memory, S3).
+	 */
+	getConfigHash?(): string | undefined;
 
 	/**
 	 * Checks if the backend has enough credentials/configuration to perform operations.

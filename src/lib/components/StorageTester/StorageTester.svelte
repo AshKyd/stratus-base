@@ -188,6 +188,9 @@
 			localStorage.removeItem(`tester_config_${backend.id}_${field.key}`);
 			configValues[field.key] = '';
 		});
+		if (backend.disconnect) {
+			await backend.disconnect();
+		}
 		isConfigured = false;
 		files = [];
 		activeFileContent = null;

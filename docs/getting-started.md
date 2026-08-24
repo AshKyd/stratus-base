@@ -65,9 +65,65 @@ const client = new StratusBase({
 });
 ```
 
+> **Credential Persistence**: On instantiation, `StratusBase` automatically looks up and restores any valid credentials saved in `localStorage` for the same backend configuration.
+
 ---
 
-## 5. Checking Remote Setup (`isSetUp`)
+## 5. Checking Authentication (`isConfigured`)
+
+Before interacting with remote storage, check whether the backend has valid credentials and is authenticated:
+
+```typescript
+const isAuth = await client.isConfigured();
+
+if (!isAuth) {
+	// Not authenticated: Prompt the user to connect or start the OAuth flow
+	console.log('Backend requires authentication.');
+} else {
+	// Authenticated and ready to check remote setup or sync
+	console.log('Backend is authenticated.');
+}
+```
+
+### Initiating the Authentication Flow
+
+If `isConfigured()` returns `false`, initiate provider-specific authentication directly via the `client`:
+
+#### OAuth Providers (Dropbox, Google Drive)
+1. **Redirect to OAuth login**:
+   ```typescript
+   const redirectUri = window.location.origin + '/oauth/callback';
+   const authUrl = await client.getAuthUrl(redirectUri);
+   window.location.href = authUrl;
+   ```
+2. **Handle OAuth callback**:
+   On your callback route, exchange the authorization code for credentials:
+   ```typescript
+   // Dropbox / OAuth Code Flow
+   const params = new URLSearchParams(window.location.search);
+   const code = params.get('code');
+   if (code) {
+       await client.exchangeCode(code, redirectUri);
+       // Credentials are automatically persisted by StratusBase to localStorage!
+   }
+
+   // Google Drive
+   const result = GoogleDriveStorage.handleAuthCallback();
+   if (result?.mode === 'redirect') {
+       client.setCredentials(result.credentials);
+   }
+   ```
+
+#### Token Providers (GitHub)
+Prompt the user for their Personal Access Token (PAT) and set credentials:
+```typescript
+client.setCredentials({ accessToken: userEnteredToken });
+// Automatically persisted by StratusBase to localStorage
+```
+
+---
+
+## 6. Checking Remote Setup (`isSetUp`)
 
 Before beginning sync or onboarding, check if the remote repository has already been initialised:
 
@@ -88,7 +144,7 @@ if (!isSetUp) {
 
 ---
 
-## 6. Working with Files (CRUD)
+## 7. Working with Files (CRUD)
 
 `StratusBase` exposes standard filesystem operations that interact with the local OPFS cache:
 
@@ -134,7 +190,7 @@ await client.deleteFile('/notes/intro.md');
 
 ---
 
-## 7. Synchronising with Remote
+## 8. Synchronising with Remote
 
 To push local updates and pull remote changes, run the `sync()` method:
 
@@ -171,7 +227,7 @@ const result = await client.forceSync();
 
 ---
 
-## 8. Event System
+## 9. Event System
 
 `StratusBase` extends the native browser `EventTarget` class. You can attach standard event listeners to monitor sync lifecycles:
 
@@ -196,11 +252,17 @@ client.addEventListener('error', (e) => {
 	const error = (e as CustomEvent).detail;
 	console.error('Sync error occurred:', error);
 });
+
+client.addEventListener('reauthrequired', (e) => {
+	const { backend, reason } = (e as CustomEvent).detail;
+	console.warn(`Re-authentication required for ${backend} (${reason})`);
+	// Prompt the user to re-authenticate or renew expired OAuth tokens
+});
 ```
 
 ---
 
-## 9. Handling Conflicts
+## 10. Handling Conflicts
 
 When a conflict occurs (i.e. both local and remote have newer modifications), `StratusBase` writes the remote content to an updates file (`/path/to/file_updates.ext`) and flags the original file in a `'conflict'` state.
 
@@ -216,11 +278,11 @@ await client.resolveConflict('/notes/intro.md', resolvedBytes);
 
 ---
 
-## 10. Resetting Client and Session (Logout)
+## 11. Logging Out (`logout`)
 
-To securely clear the local cache and remove user sessions when logging out of the application:
+To securely clear the local cache, wipe persisted credentials in `localStorage`, and disconnect backend sessions:
 
 ```typescript
-// Deletes the local OPFS storage folder recursively and clears active credentials/tokens on the backend
-await client.reset();
+// Deletes the local OPFS storage folder recursively, removes stored credentials, and disconnects the backend
+await client.logout();
 ```

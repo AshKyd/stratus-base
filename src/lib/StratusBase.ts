@@ -1,5 +1,10 @@
 import type { StorageBackend, StorageFileInfo, WriteOptions } from './types.ts';
 import { debounceAsync } from './utils/debounceAsync.ts';
+import {
+	loadCredentials,
+	saveCredentials,
+	clearCredentials
+} from './utils/CredentialManager.ts';
 
 export interface FileMetadata {
 	path: string;
@@ -104,6 +109,7 @@ export class StratusBase extends EventTarget {
 	private middleware: StratusMiddleware;
 	private sparse: boolean;
 	private clientName: string;
+	private unsubscribeAuthEvents?: () => void;
 
 	/**
 	 * Initialises a new StratusBase sync client instance.
@@ -116,6 +122,58 @@ export class StratusBase extends EventTarget {
 		this.middleware = options.middleware;
 		this.sparse = options.sparse ?? false;
 		this.clientName = options.clientName ?? `Client-${Math.random().toString(36).substring(2, 10)}`;
+
+		this.initCredentials();
+	}
+
+	/**
+	 * Automatically restores or persists credentials for supported backends,
+	 * and listens for token lifecycle events.
+	 */
+	private initCredentials(): void {
+		const configHash = this.backend.getConfigHash?.();
+		if (!configHash) {
+			return;
+		}
+
+		// Restore existing credentials from localStorage if backend doesn't already have tokens set
+		const existingTokens = this.backend.getCredentials?.();
+		if (!existingTokens?.accessToken) {
+			const storedCreds = loadCredentials(configHash);
+			if (storedCreds && typeof this.backend.setCredentials === 'function') {
+				this.backend.setCredentials(storedCreds);
+			}
+		} else {
+			// Save current credentials to localStorage
+			saveCredentials(configHash, existingTokens);
+		}
+
+		// Listen for auth lifecycle events from backend via standard EventTarget
+		const handleTokenRenewed = (e: Event) => {
+			const payload = (e as CustomEvent).detail;
+			saveCredentials(configHash, payload);
+			this.dispatchEvent(new CustomEvent('authrenewed', { detail: payload }));
+		};
+
+		const handleReauthRequired = (e: Event) => {
+			const payload = (e as CustomEvent).detail;
+			this.dispatchEvent(
+				new CustomEvent('reauthrequired', {
+					detail: {
+						backend: this.backend.id,
+						...(payload || {})
+					}
+				})
+			);
+		};
+
+		this.backend.addEventListener('tokenrenewed', handleTokenRenewed);
+		this.backend.addEventListener('reauthrequired', handleReauthRequired);
+
+		this.unsubscribeAuthEvents = () => {
+			this.backend.removeEventListener('tokenrenewed', handleTokenRenewed);
+			this.backend.removeEventListener('reauthrequired', handleReauthRequired);
+		};
 	}
 
 	// --- OPFS Helper Methods ---
@@ -552,6 +610,57 @@ export class StratusBase extends EventTarget {
 	}
 
 	/**
+	 * Checks if the underlying backend has valid credentials and configuration to perform operations.
+	 * @returns True if configured and authenticated, false if authentication/setup is required.
+	 */
+	public async isConfigured(): Promise<boolean> {
+		return await this.backend.isConfigured();
+	}
+
+	/**
+	 * Returns the backend configuration hash identifier used for session persistence.
+	 */
+	public getConfigHash(): string | undefined {
+		return this.backend.getConfigHash?.();
+	}
+
+	/**
+	 * Returns the URL to redirect the user to start an OAuth authentication flow (if supported by backend).
+	 */
+	public async getAuthUrl(redirectUri: string, state?: string): Promise<string> {
+		if (typeof this.backend.getAuthUrl !== 'function') {
+			throw new Error(`Backend ${this.backend.id} does not support OAuth authentication.`);
+		}
+		return await this.backend.getAuthUrl(redirectUri, state);
+	}
+
+	/**
+	 * Exchanges an OAuth authorization code for credentials and saves them to the backend (if supported).
+	 */
+	public async exchangeCode(code: string, redirectUri: string): Promise<StorageAuthCredentials> {
+		if (typeof this.backend.exchangeCode !== 'function') {
+			throw new Error(`Backend ${this.backend.id} does not support OAuth code exchange.`);
+		}
+		return await this.backend.exchangeCode(code, redirectUri);
+	}
+
+	/**
+	 * Sets authentication credentials on the backend.
+	 */
+	public setCredentials(credentials: StorageAuthCredentials): void {
+		if (typeof this.backend.setCredentials === 'function') {
+			this.backend.setCredentials(credentials);
+		}
+	}
+
+	/**
+	 * Returns the current active credentials from the backend.
+	 */
+	public getCredentials(): StorageAuthCredentials | undefined {
+		return this.backend.getCredentials?.();
+	}
+
+	/**
 	 * Checks whether the remote storage backend has already been set up with existing data.
 	 * Defers to the configured middleware to determine whether initial onboarding is needed.
 	 * @returns True if remote storage is already set up, false if onboarding is required.
@@ -699,9 +808,9 @@ export class StratusBase extends EventTarget {
 
 	/**
 	 * Securely deletes all local OPFS files and configuration under the client root folder,
-	 * and disconnects/resets the backend.
+	 * clears persisted credentials from localStorage, and disconnects the backend.
 	 */
-	public async reset(): Promise<void> {
+	public async logout(): Promise<void> {
 		// 1. Wipe local OPFS storage
 		try {
 			const root = await this.getRootHandle();
@@ -716,11 +825,27 @@ export class StratusBase extends EventTarget {
 			// Ignore if directory doesn't exist or deletion fails
 		}
 
-		// 2. Disconnect backend
+		// 2. Clear stored credentials
+		clearCredentials();
+
+		// 3. Disconnect backend
 		if (typeof this.backend.disconnect === 'function') {
 			await this.backend.disconnect();
 		} else if (typeof this.backend.setCredentials === 'function') {
 			this.backend.setCredentials({});
 		}
+
+		// 4. Teardown auth listener
+		if (this.unsubscribeAuthEvents) {
+			this.unsubscribeAuthEvents();
+			this.unsubscribeAuthEvents = undefined;
+		}
+	}
+
+	/**
+	 * @deprecated Use `logout()` instead.
+	 */
+	public async reset(): Promise<void> {
+		return this.logout();
 	}
 }
