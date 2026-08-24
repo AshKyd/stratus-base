@@ -27,15 +27,16 @@ const backend = new S3Storage({
 });
 ```
 
-*(For interactive OAuth backends like Dropbox or Google Drive, consult their specific setup guides in the `docs/` folder.)*
+_(For interactive OAuth backends like Dropbox or Google Drive, consult their specific setup guides in the `docs/` folder.)_
 
 ---
 
 ## 3. Configuring Middleware
 
-Middlewares control how files are stored remotely. 
+Middlewares control how files are stored remotely.
 
 ### Encrypted ZIP Chunking (`MiddlewareZipChunk`)
+
 Packs files into sequential, password-encrypted ZIP archives. This hides filenames, sizes, and file structures from the remote host (ideal for privacy/Obsidian-style apps).
 
 ```typescript
@@ -44,8 +45,8 @@ const password = localStorage.getItem('vault_password') || generateSecurePasswor
 
 const middleware = new MiddlewareZipChunk({
 	chunkSizeLimit: 5 * 1024 * 1024, // 5MB target chunk size
-	password: password,              // Enforces AES-256 encryption
-	atomic: true                     // Enables atomic write-then-rename if supported
+	password: password, // Enforces AES-256 encryption
+	atomic: true // Enables atomic write-then-rename if supported
 });
 ```
 
@@ -58,40 +59,66 @@ Pass the backend and middleware into the main sync client:
 ```typescript
 const client = new StratusBase({
 	backend,
-	localRoot: '/my-notes-vault',  // Cache directory inside browser OPFS
+	localRoot: '/my-notes-vault', // Cache directory inside browser OPFS
 	middleware,
-	sparse: false                  // If true, downloads file contents on-demand (lazy)
+	sparse: false // If true, downloads file contents on-demand (lazy)
 });
 ```
 
 ---
 
-## 5. Working with Files (CRUD)
+## 5. Checking Remote Setup (`isSetUp`)
+
+Before beginning sync or onboarding, check if the remote repository has already been initialised:
+
+```typescript
+const isSetUp = await client.isSetUp();
+
+if (!isSetUp) {
+	// First-time onboarding (e.g. prompt to create/save encryption password, seed initial files)
+	console.log('No existing data detected on remote. Starting onboarding...');
+} else {
+	// Existing data detected (e.g. prompt for existing vault password)
+	console.log('Existing data detected on remote.');
+}
+```
+
+- **`MiddlewareIndividualFile`**: Returns `true` if any files or folders exist on the remote (excluding `/sync.lock`).
+- **`MiddlewareZipChunk`**: Returns `true` if at least one `archive_chunk_*.7z` chunk exists on the remote.
+
+---
+
+## 6. Working with Files (CRUD)
 
 `StratusBase` exposes standard filesystem operations that interact with the local OPFS cache:
 
 ### Writing a file (Text Helper)
+
 ```typescript
 await client.writeTextFile('/notes/intro.md', '# Welcome to StratusBase');
 ```
 
 ### Reading a file (Text Helper)
+
 ```typescript
 const markdownText = await client.readTextFile('/notes/intro.md');
 ```
 
 ### Writing raw binary
+
 ```typescript
 const content = new Uint8Array([1, 2, 3]);
 await client.writeFile('/data.bin', content);
 ```
 
 ### Reading raw binary
+
 ```typescript
 const bytes = await client.readFile('/data.bin');
 ```
 
 ### Listing a directory
+
 ```typescript
 const files = await client.listDirectory('/notes');
 for (const file of files) {
@@ -100,25 +127,30 @@ for (const file of files) {
 ```
 
 ### Deleting a file
+
 ```typescript
 await client.deleteFile('/notes/intro.md');
 ```
 
 ---
 
-## 6. Synchronising with Remote
+## 7. Synchronising with Remote
 
 To push local updates and pull remote changes, run the `sync()` method:
 
 ```typescript
 try {
 	const result = await client.sync();
-	console.log(`Sync completed! Created: ${result.created.length}, Updated: ${result.updated.length}`);
+	console.log(
+		`Sync completed! Created: ${result.created.length}, Updated: ${result.updated.length}`
+	);
 } catch (err) {
 	if (err.name === 'SyncConflictError') {
 		console.warn('Sync finished with conflicts. Handle resolution.');
 	} else if (err.name === 'SyncLockedError') {
-		console.warn(`Sync is locked by ${err.lockDetails.clientName} (started at ${err.lockDetails.date}).`);
+		console.warn(
+			`Sync is locked by ${err.lockDetails.clientName} (started at ${err.lockDetails.date}).`
+		);
 	} else {
 		console.error('Sync failed:', err);
 	}
@@ -126,6 +158,7 @@ try {
 ```
 
 ### Checking and Breaking Locks (Optional)
+
 If you want to check if the remote repository is locked before triggering a sync, or force a sync by breaking an existing lock:
 
 ```typescript
@@ -136,10 +169,9 @@ const available = await client.canSync();
 const result = await client.forceSync();
 ```
 
-
 ---
 
-## 7. Event System
+## 8. Event System
 
 `StratusBase` extends the native browser `EventTarget` class. You can attach standard event listeners to monitor sync lifecycles:
 
@@ -156,7 +188,7 @@ client.addEventListener('sync', (e) => {
 client.addEventListener('conflict', (e) => {
 	const conflict = (e as CustomEvent).detail;
 	console.warn(`File in conflict: ${conflict.path}`);
-	
+
 	// Trigger conflict resolution flow
 });
 
@@ -168,7 +200,7 @@ client.addEventListener('error', (e) => {
 
 ---
 
-## 8. Handling Conflicts
+## 9. Handling Conflicts
 
 When a conflict occurs (i.e. both local and remote have newer modifications), `StratusBase` writes the remote content to an updates file (`/path/to/file_updates.ext`) and flags the original file in a `'conflict'` state.
 
@@ -184,7 +216,7 @@ await client.resolveConflict('/notes/intro.md', resolvedBytes);
 
 ---
 
-## 9. Resetting Client and Session (Logout)
+## 10. Resetting Client and Session (Logout)
 
 To securely clear the local cache and remove user sessions when logging out of the application:
 
@@ -192,4 +224,3 @@ To securely clear the local cache and remove user sessions when logging out of t
 // Deletes the local OPFS storage folder recursively and clears active credentials/tokens on the backend
 await client.reset();
 ```
-

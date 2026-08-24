@@ -50,7 +50,20 @@ const client = new StratusBase({
 });
 ```
 
-### 2. File Operations
+### 2. Checking Remote Setup
+
+Check if the remote storage already contains existing data or if onboarding is required:
+
+```typescript
+const isSetUp = await client.isSetUp();
+if (!isSetUp) {
+	// First-time onboarding (e.g. prompt user to create/save password, seed initial files)
+} else {
+	// Existing data detected (e.g. prompt for existing vault password)
+}
+```
+
+### 3. File Operations
 
 Local client operations are simple Promise-based async methods. You can work with raw binary data or use built-in text helpers:
 
@@ -64,7 +77,7 @@ await client.writeFile('/image.png', pngBytes);
 const imageBytes = await client.readFile('/image.png');
 ```
 
-### 3. Synchronization
+### 4. Synchronization
 
 Run `sync()` to push local edits and pull remote changes:
 
@@ -76,7 +89,7 @@ console.log(result.created, result.updated, result.deleted);
 > [!NOTE]
 > Concurrent calls to `sync()` are queued and coalesced automatically. If multiple sync operations are requested while a sync is already active, they will wait and run exactly once in a single coalesced follow-up execution.
 
-### 4. Cooperative Lockfile (Concurrency Control)
+### 5. Cooperative Lockfile (Concurrency Control)
 
 To prevent multiple clients from syncing concurrently, `StratusBase` creates a remote `/sync.lock` file while syncing.
 
@@ -91,7 +104,7 @@ if (await client.canSync()) {
 }
 ```
 
-### 5. Session Reset & Logout
+### 6. Session Reset & Logout
 
 Call `reset()` to recursively delete the local cache folder in OPFS and clear credentials on the configured backend:
 
@@ -116,21 +129,28 @@ those commands is enough; run it manually (add `--force` to refetch) if you need
 The project has two test suites: unit tests using Node's native test runner and E2E integration tests running in a headless Chromium browser via Vitest and Playwright.
 
 ### 1. Unit Tests (Mocked)
+
 Runs unit tests locally in Node using mocked remote storage environments:
+
 ```bash
 npm run test
 ```
 
 ### 2. E2E Browser Integration Tests
+
 Runs tests inside native browser environments against real remote backends (e.g., Google Drive):
+
 ```bash
 npm run test:browser
 ```
+
 > [!NOTE]
 > E2E integration tests are skipped by default unless valid authentication credentials exist in your local `.env` file.
 
 #### Setting up Credentials for E2E Tests
+
 To run E2E tests against your real accounts:
+
 1. Start the local Svelte development server:
    ```bash
    npm run dev
@@ -146,6 +166,7 @@ To run E2E tests against your real accounts:
    ```
 
 #### Debug Logs
+
 When E2E tests are run, detailed logs outlining actions taken, zip archive uncompressed sizes, compressed sizes, and packed files are written to `debug.txt` at the root of the project directory.
 
 ---
