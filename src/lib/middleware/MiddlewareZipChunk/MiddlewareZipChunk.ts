@@ -278,35 +278,32 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 		const entries = Array.from(filesMap.entries()).filter(([name]) => name !== '.metadata.json');
 		await Promise.all(
 			entries.map(async ([path, content]) => {
+				const cleanPath = path.replace(/^\/+/, '');
 				const localFiles = metadata.files;
-				const localFile = localFiles[path];
-				const remoteFileMeta = chunkMeta.files[path];
+				const localFile = localFiles[cleanPath] || localFiles['/' + cleanPath] || localFiles[path];
+				const remoteFileMeta = chunkMeta.files[path] || chunkMeta.files[cleanPath] || chunkMeta.files['/' + cleanPath];
 				const remoteModifiedAt = remoteFileMeta?.modifiedAt ?? Date.now();
 
 				const isLocalModified = localFile && (localFile.status === 'dirty' || localFile.status === 'deleted');
 
 				if (!isLocalModified) {
 					// Non-modified locally, safe to extract/lazy-load
+					const fileRecord = {
+						path,
+						type: 'file',
+						size: content.length,
+						localModifiedAt: remoteModifiedAt,
+						remoteModifiedAt,
+						status: 'clean'
+					};
+					localFiles[path] = fileRecord;
+					localFiles[cleanPath] = fileRecord;
+					localFiles['/' + cleanPath] = fileRecord;
+
 					if (context.sparse) {
-						localFiles[path] = {
-							path,
-							type: 'file',
-							size: content.length,
-							localModifiedAt: remoteModifiedAt,
-							remoteModifiedAt,
-							status: 'clean'
-						};
 						await context.deleteLocalFile(path); // Ensure clean OPFS state for lazy load
 					} else {
 						await context.writeLocalFile(path, content);
-						localFiles[path] = {
-							path,
-							type: 'file',
-							size: content.length,
-							localModifiedAt: remoteModifiedAt,
-							remoteModifiedAt,
-							status: 'clean'
-						};
 					}
 
 					if (!localFile) {

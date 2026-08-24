@@ -290,17 +290,27 @@ export class StratusBase extends EventTarget {
 	 * Returns null if the file does not exist locally or is flagged as deleted.
 	 * @param path Relative path to the target file.
 	 */
+	private normalizePath(path: string): string {
+		return path.replace(/^\/+/, '');
+	}
+
+	/**
+	 * Checks status and gets metadata for a local file.
+	 * Returns null if the file does not exist locally or is flagged as deleted.
+	 * @param path Relative path to the target file.
+	 */
 	public async stat(path: string): Promise<StorageFileInfo | null> {
 		const metadata = await this.getMetadata();
-		const fileMeta = metadata.files[path];
+		const cleanPath = this.normalizePath(path);
+		const fileMeta = metadata.files[cleanPath] || metadata.files['/' + cleanPath] || metadata.files[path];
 
 		if (!fileMeta || fileMeta.status === 'deleted') {
 			return null;
 		}
 
 		return {
-			path,
-			name: path.split('/').pop() || '',
+			path: fileMeta.path,
+			name: fileMeta.path.split('/').pop() || '',
 			type: fileMeta.type,
 			size: fileMeta.size,
 			modifiedAt: new Date(fileMeta.localModifiedAt),
@@ -315,7 +325,8 @@ export class StratusBase extends EventTarget {
 	 */
 	public async readFile(path: string): Promise<Uint8Array> {
 		const metadata = await this.getMetadata();
-		const fileMeta = metadata.files[path];
+		const cleanPath = this.normalizePath(path);
+		const fileMeta = metadata.files[cleanPath] || metadata.files['/' + cleanPath] || metadata.files[path];
 
 		if (!fileMeta || fileMeta.status === 'deleted') {
 			throw new Error(`File not found: ${path}`);
@@ -355,7 +366,8 @@ export class StratusBase extends EventTarget {
 		options?: WriteOptions
 	): Promise<void> {
 		const metadata = await this.getMetadata();
-		const existing = metadata.files[path];
+		const cleanPath = this.normalizePath(path);
+		const existing = metadata.files[cleanPath] || metadata.files['/' + cleanPath] || metadata.files[path];
 
 		// Check if content has actually changed by reading existing file first
 		let hasContentChanged = true;
@@ -423,7 +435,8 @@ export class StratusBase extends EventTarget {
 	 */
 	public async deleteFile(path: string): Promise<void> {
 		const metadata = await this.getMetadata();
-		const existing = metadata.files[path];
+		const cleanPath = this.normalizePath(path);
+		const existing = metadata.files[cleanPath] || metadata.files['/' + cleanPath] || metadata.files[path];
 		if (!existing) return;
 
 		try {
@@ -442,6 +455,10 @@ export class StratusBase extends EventTarget {
 
 		existing.status = 'deleted';
 		existing.localModifiedAt = Date.now();
+		if (metadata.files[cleanPath]) metadata.files[cleanPath].status = 'deleted';
+		if (metadata.files['/' + cleanPath]) metadata.files['/' + cleanPath].status = 'deleted';
+		if (metadata.files[path]) metadata.files[path].status = 'deleted';
+
 		await this.saveMetadata(metadata);
 	}
 
