@@ -10,6 +10,7 @@ import type {
 } from '../../StratusBase.ts';
 import { SyncConflictError } from '../../StratusBase.ts';
 import { SevenZipWriter, SevenZipReader, JS7Z_WASM_URL } from '../../utils/codec7z.ts';
+import { normalize } from 'pathe';
 
 export interface MiddlewareZipChunkOptions {
 	chunkSizeLimit?: number; // Target chunk size limit, default 5MB
@@ -277,18 +278,18 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 		// Extract entries
 		const entries = Array.from(filesMap.entries()).filter(([name]) => name !== '.metadata.json');
 		await Promise.all(
-			entries.map(async ([path, content]) => {
-				const cleanPath = path.replace(/^\/+/, '');
+			entries.map(async ([entryPath, content]) => {
+				const path = normalize(entryPath).replace(/^\/+/, '');
 				const localFiles = metadata.files;
-				const localFile = localFiles[cleanPath] || localFiles['/' + cleanPath] || localFiles[path];
-				const remoteFileMeta = chunkMeta.files[path] || chunkMeta.files[cleanPath] || chunkMeta.files['/' + cleanPath];
+				const localFile = localFiles[path];
+				const remoteFileMeta = chunkMeta.files[path] || chunkMeta.files[entryPath] || chunkMeta.files['/' + path];
 				const remoteModifiedAt = remoteFileMeta?.modifiedAt ?? Date.now();
 
 				const isLocalModified = localFile && (localFile.status === 'dirty' || localFile.status === 'deleted');
 
 				if (!isLocalModified) {
 					// Non-modified locally, safe to extract/lazy-load
-					const fileRecord = {
+					localFiles[path] = {
 						path,
 						type: 'file',
 						size: content.length,
@@ -296,9 +297,6 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 						remoteModifiedAt,
 						status: 'clean'
 					};
-					localFiles[path] = fileRecord;
-					localFiles[cleanPath] = fileRecord;
-					localFiles['/' + cleanPath] = fileRecord;
 
 					if (context.sparse) {
 						await context.deleteLocalFile(path); // Ensure clean OPFS state for lazy load
@@ -458,22 +456,24 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 			}
 
 			// Add/overwrite file in the current chunk
-			filesMap.set(path, content);
+			const normalizedPath = normalize(path).replace(/^\/+/, '');
+			filesMap.set(normalizedPath, content);
 			
-			const isNew = !currentChunk.files[path];
+			const isNew = !currentChunk.files[normalizedPath];
 			if (isNew) {
-				created.push(path);
+				created.push(normalizedPath);
 			} else {
-				updated.push(path);
+				updated.push(normalizedPath);
 			}
 
-			currentChunk.files[path] = {
+			currentChunk.files[normalizedPath] = {
 				size: content.length,
 				modifiedAt: fileMeta.localModifiedAt
 			};
 
-			localFiles[path] = {
+			localFiles[normalizedPath] = {
 				...fileMeta,
+				path: normalizedPath,
 				status: 'clean',
 				remoteModifiedAt: Date.now()
 			};

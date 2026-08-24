@@ -1,5 +1,6 @@
 import type { StorageBackend, StorageFileInfo, WriteOptions } from './types.ts';
 import { debounceAsync } from './utils/debounceAsync.ts';
+import { normalize } from 'pathe';
 import {
 	loadCredentials,
 	saveCredentials,
@@ -291,7 +292,7 @@ export class StratusBase extends EventTarget {
 	 * @param path Relative path to the target file.
 	 */
 	private normalizePath(path: string): string {
-		return path.replace(/^\/+/, '');
+		return normalize(path).replace(/^\/+/, '');
 	}
 
 	/**
