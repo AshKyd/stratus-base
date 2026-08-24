@@ -6,6 +6,7 @@ import type {
 	WriteOptions
 } from '../types.ts';
 import { BaseStorageOperation } from '../utils/BaseStorageOperation.ts';
+import { clearCredentials } from '../utils/CredentialManager.ts';
 
 /**
  * Authentication lifecycle events emitted by {@link GoogleDriveStorage}.
@@ -394,6 +395,7 @@ export class GoogleDriveStorage extends EventTarget implements StorageBackend {
 		this.pathIdCache.clear();
 		clearTimeout(this.expiryTimer);
 		this.expiryTimer = undefined;
+		clearCredentials();
 	}
 
 	/**

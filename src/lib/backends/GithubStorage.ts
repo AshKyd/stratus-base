@@ -6,6 +6,7 @@ import type {
 	WriteOptions
 } from '../types.ts';
 import { BaseStorageOperation } from '../utils/BaseStorageOperation.ts';
+import { clearCredentials } from '../utils/CredentialManager.ts';
 
 /**
  * Configuration options for initializing the GitHub storage backend.
@@ -115,6 +116,7 @@ export class GithubStorage extends EventTarget implements StorageBackend {
 	 */
 	async disconnect(): Promise<void> {
 		this.accessToken = undefined;
+		clearCredentials();
 	}
 
 	/**

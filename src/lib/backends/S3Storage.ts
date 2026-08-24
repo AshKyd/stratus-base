@@ -10,6 +10,7 @@ import {
 } from '@aws-sdk/client-s3';
 import type { StorageBackend, StorageFileInfo, StorageOperation, WriteOptions } from '../types.ts';
 import { BaseStorageOperation } from '../utils/BaseStorageOperation.ts';
+import { clearCredentials } from '../utils/CredentialManager.ts';
 
 /**
  * Configuration options for initializing the S3 storage backend.
@@ -99,6 +100,7 @@ export class S3Storage extends EventTarget implements StorageBackend {
 				secretAccessKey: ''
 			}
 		});
+		clearCredentials();
 	}
 
 

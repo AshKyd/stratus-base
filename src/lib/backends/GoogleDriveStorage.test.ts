@@ -337,4 +337,11 @@ test('GoogleDriveStorage setCredentials dispatches tokenrenewed event', async ()
 	storage.removeEventListener('tokenrenewed', handler);
 });
 
+test('GoogleDriveStorage disconnect clears credentials and removes stored session', async () => {
+	const storage = new GoogleDriveStorage({ clientId: 'mock-google-client' });
+	storage.setCredentials({ accessToken: 'google-token' });
+	assert.strictEqual(await storage.isConfigured(), true);
 
+	await storage.disconnect();
+	assert.strictEqual(await storage.isConfigured(), false);
+});

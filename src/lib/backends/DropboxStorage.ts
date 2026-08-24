@@ -7,6 +7,7 @@ import type {
 	WriteOptions
 } from '../types.ts';
 import { BaseStorageOperation } from '../utils/BaseStorageOperation.ts';
+import { clearCredentials } from '../utils/CredentialManager.ts';
 
 const VERIFIER_KEY = 'dropbox_code_verifier';
 
@@ -243,6 +244,7 @@ export class DropboxStorage extends EventTarget implements StorageBackend {
 		this.auth.setAccessToken('');
 		this.auth.setRefreshToken('');
 		this.auth.setAccessTokenExpiresAt(undefined as any);
+		clearCredentials();
 	}
 
 	/**
