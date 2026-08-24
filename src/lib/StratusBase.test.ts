@@ -108,6 +108,9 @@ class MockBackend implements StorageBackend {
 const mockMiddleware = {
 	async sync() {
 		return { created: [], updated: [], deleted: [] };
+	},
+	async isSetUp() {
+		return true;
 	}
 };
 
@@ -486,6 +489,35 @@ test('StratusBase remote lockfile concurrency control', async (t) => {
 	const res = await stratus2.forceSync();
 	assert.deepStrictEqual(res, { created: [], updated: [], deleted: [] });
 	assert.strictEqual(lockFileExists, false); // Lock is cleaned up after successful forceSync
+});
+
+test('StratusBase isSetUp delegates to middleware', async () => {
+	let isSetUpCalledWithContext = false;
+	const customMiddleware = {
+		async sync() {
+			return { created: [], updated: [], deleted: [] };
+		},
+		async isSetUp(context: any) {
+			if (context && context.backend && typeof context.getLocalMetadata === 'function') {
+				isSetUpCalledWithContext = true;
+			}
+			return true;
+		}
+	};
+
+	const storageMock = new MockStorageManager();
+	setStorageManager(storageMock);
+
+	const backend = new MockBackend();
+	const stratus = new StratusBase({
+		backend,
+		localRoot: '/app',
+		middleware: customMiddleware
+	});
+
+	const result = await stratus.isSetUp();
+	assert.strictEqual(result, true);
+	assert.strictEqual(isSetUpCalledWithContext, true);
 });
 
 

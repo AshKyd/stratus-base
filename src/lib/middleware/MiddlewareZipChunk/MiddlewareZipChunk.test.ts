@@ -439,4 +439,39 @@ test('MiddlewareZipChunk sync runs', async (t) => {
 		assert.ok(meta.chunks['/archive_chunk_001.7z']);
 		assert.strictEqual(meta.chunks['/archive_chunk_002.7z'], undefined);
 	});
+
+	await t.test('isSetUp returns false when no chunks exist and true when at least one 7z chunk exists', async () => {
+		const storageMock = new MockStorageManager();
+		setStorageManager(storageMock);
+
+		const backend = new MemoryStorage();
+		const middleware = new MiddlewareZipChunk({ password: 'test-pass' });
+		const stratus = new StratusBase({
+			backend,
+			localRoot: '/app',
+			middleware
+		});
+
+		// Empty storage
+		assert.strictEqual(await stratus.isSetUp(), false);
+
+		// Unrelated files or sync.lock only
+		backend.getFilesMap().set('/sync.lock', {
+			content: new TextEncoder().encode('lock'),
+			modifiedAt: new Date()
+		});
+		backend.getFilesMap().set('/other_file.txt', {
+			content: new TextEncoder().encode('other'),
+			modifiedAt: new Date()
+		});
+		assert.strictEqual(await stratus.isSetUp(), false);
+
+		// Valid archive chunk present
+		backend.getFilesMap().set('/archive_chunk_00000000000000000001.7z', {
+			content: new Uint8Array([1, 2, 3]),
+			modifiedAt: new Date()
+		});
+		assert.strictEqual(await stratus.isSetUp(), true);
+	});
 });
+

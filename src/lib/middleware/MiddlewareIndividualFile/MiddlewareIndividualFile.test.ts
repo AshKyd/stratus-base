@@ -256,4 +256,43 @@ test('MiddlewareIndividualFile sync runs', async (t) => {
 
 		assert.ok(backend.atomicWritesTracked.includes('/atomic.md'));
 	});
+
+	await t.test('isSetUp returns false on empty storage and true when files or folders exist', async () => {
+		const storageMock = new MockStorageManager();
+		setStorageManager(storageMock);
+
+		const backend = new MemoryStorage();
+		const middleware = new MiddlewareIndividualFile();
+		const stratus = new StratusBase({
+			backend,
+			localRoot: '/app',
+			middleware
+		});
+
+		// Empty storage
+		assert.strictEqual(await stratus.isSetUp(), false);
+
+		// Only /sync.lock exists
+		backend.getFilesMap().set('/sync.lock', {
+			content: new TextEncoder().encode('lock'),
+			modifiedAt: new Date()
+		});
+		assert.strictEqual(await stratus.isSetUp(), false);
+
+		// File exists at root
+		backend.getFilesMap().set('/note.md', {
+			content: new TextEncoder().encode('Note content'),
+			modifiedAt: new Date()
+		});
+		assert.strictEqual(await stratus.isSetUp(), true);
+
+		// Remove file at root and add nested file/folder
+		backend.getFilesMap().delete('/note.md');
+		backend.getFilesMap().set('/folder/subnote.md', {
+			content: new TextEncoder().encode('Nested content'),
+			modifiedAt: new Date()
+		});
+		assert.strictEqual(await stratus.isSetUp(), true);
+	});
 });
+

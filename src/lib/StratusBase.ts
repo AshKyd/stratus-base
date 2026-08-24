@@ -1,5 +1,4 @@
-import type { StorageBackend, StorageFileInfo, StorageOperation, WriteOptions } from './types.ts';
-import { BaseStorageOperation } from './utils/BaseStorageOperation.ts';
+import type { StorageBackend, StorageFileInfo, WriteOptions } from './types.ts';
 import { debounceAsync } from './utils/debounceAsync.ts';
 
 export interface FileMetadata {
@@ -73,6 +72,7 @@ export interface StratusSyncContext {
 
 export interface StratusMiddleware {
 	sync(context: StratusSyncContext): Promise<SyncResult>;
+	isSetUp(context: StratusSyncContext): Promise<boolean>;
 }
 
 export interface StratusBaseOptions {
@@ -503,114 +503,10 @@ export class StratusBase extends EventTarget {
 	}
 
 	/**
-	 * Synchronises client local files and metadata with the remote storage backend.
-	 * Dispatches `syncstart`, `sync`, `conflict`, and `error` events.
-	 * Throws `SyncLockedError` if the remote storage is locked, or `SyncConflictError` if conflict conditions arise.
+	 * Creates a standard sync context bound to this StratusBase instance.
 	 */
-	public sync = debounceAsync(async (): Promise<SyncResult> => {
-		// Concurrency Check (Cooperative Lockfile)
-		const lockStat = await this.backend.stat('/sync.lock');
-		if (lockStat) {
-			let lockDetails = { date: new Date().toISOString(), clientName: 'Unknown Client', operation: 'sync' };
-			try {
-				const op = this.backend.readFile('/sync.lock');
-				const bytes = await op.finished;
-				lockDetails = JSON.parse(new TextDecoder().decode(bytes));
-			} catch {
-				if (lockStat.modifiedAt) {
-					lockDetails.date = lockStat.modifiedAt.toISOString();
-				}
-			}
-			const lockError = new SyncLockedError(lockDetails);
-			this.dispatchEvent(new CustomEvent('error', { detail: lockError }));
-			throw lockError;
-		}
-
-		// Write lockfile
-		const lockDetails = {
-			date: new Date().toISOString(),
-			clientName: this.clientName,
-			operation: 'sync'
-		};
-		const lockBytes = new TextEncoder().encode(JSON.stringify(lockDetails, null, 2));
-		await this.backend.writeFile('/sync.lock', lockBytes).finished;
-
-		try {
-			const context: StratusSyncContext = {
-				backend: this.backend,
-				localRoot: this.localRoot,
-				sparse: this.sparse,
-				getLocalMetadata: () => this.getMetadata(),
-				saveLocalMetadata: (meta) => this.saveMetadata(meta),
-				readLocalFile: async (path) => {
-					const handle = await this.getFileHandle(path);
-					const file = await handle.getFile();
-					return new Uint8Array(await file.arrayBuffer());
-				},
-				writeLocalFile: async (path, content) => {
-					const handle = await this.getFileHandle(path, { create: true });
-					const writable = await handle.createWritable();
-					await writable.write(content as BufferSource);
-					await writable.close();
-				},
-				deleteLocalFile: async (path) => {
-					try {
-						const contentRoot = await this.getContentRootHandle(false);
-						const segments = path.split('/').filter(Boolean);
-						const fileName = segments.pop();
-						if (fileName) {
-							const dir = await this.traverseDirectory(contentRoot, segments.join('/'), {
-								create: false
-							});
-							await dir.removeEntry(fileName);
-						}
-					} catch {
-						// File might already not exist locally
-					}
-				},
-				markClean: async (path, remoteModifiedAt, etag) => {
-					const meta = await this.getMetadata();
-					const existing = meta.files[path];
-					if (existing) {
-						existing.status = 'clean';
-						existing.remoteModifiedAt = remoteModifiedAt.getTime();
-						existing.etag = etag;
-						await this.saveMetadata(meta);
-					}
-				}
-			};
-
-			this.dispatchEvent(new CustomEvent('syncstart'));
-
-			try {
-				const result = await this.middleware.sync(context);
-				this.dispatchEvent(new CustomEvent('sync', { detail: result }));
-				return result;
-			} catch (err) {
-				if (err instanceof SyncConflictError) {
-					for (const conflict of err.conflicts) {
-						this.dispatchEvent(new CustomEvent('conflict', { detail: conflict }));
-					}
-				}
-				this.dispatchEvent(new CustomEvent('error', { detail: err }));
-				throw err;
-			}
-		} finally {
-			try {
-				await this.backend.deleteFile('/sync.lock');
-			} catch {
-				// Ignore errors deleting lockfile on cleanup
-			}
-		}
-	});
-
-
-	/**
-	 * Defragments the database storage layout on support middleware.
-	 * Packs clean active files sequentially and prunes remote history chunks.
-	 */
-	public async consolidate(): Promise<void> {
-		const context: StratusSyncContext = {
+	private createSyncContext(): StratusSyncContext {
+		return {
 			backend: this.backend,
 			localRoot: this.localRoot,
 			sparse: this.sparse,
@@ -653,6 +549,84 @@ export class StratusBase extends EventTarget {
 				}
 			}
 		};
+	}
+
+	/**
+	 * Checks whether the remote storage backend has already been set up with existing data.
+	 * Defers to the configured middleware to determine whether initial onboarding is needed.
+	 * @returns True if remote storage is already set up, false if onboarding is required.
+	 */
+	public async isSetUp(): Promise<boolean> {
+		const context = this.createSyncContext();
+		return await this.middleware.isSetUp(context);
+	}
+
+	/**
+	 * Synchronises client local files and metadata with the remote storage backend.
+	 * Dispatches `syncstart`, `sync`, `conflict`, and `error` events.
+	 * Throws `SyncLockedError` if the remote storage is locked, or `SyncConflictError` if conflict conditions arise.
+	 */
+	public sync = debounceAsync(async (): Promise<SyncResult> => {
+		// Concurrency Check (Cooperative Lockfile)
+		const lockStat = await this.backend.stat('/sync.lock');
+		if (lockStat) {
+			let lockDetails = { date: new Date().toISOString(), clientName: 'Unknown Client', operation: 'sync' };
+			try {
+				const op = this.backend.readFile('/sync.lock');
+				const bytes = await op.finished;
+				lockDetails = JSON.parse(new TextDecoder().decode(bytes));
+			} catch {
+				if (lockStat.modifiedAt) {
+					lockDetails.date = lockStat.modifiedAt.toISOString();
+				}
+			}
+			const lockError = new SyncLockedError(lockDetails);
+			this.dispatchEvent(new CustomEvent('error', { detail: lockError }));
+			throw lockError;
+		}
+
+		// Write lockfile
+		const lockDetails = {
+			date: new Date().toISOString(),
+			clientName: this.clientName,
+			operation: 'sync'
+		};
+		const lockBytes = new TextEncoder().encode(JSON.stringify(lockDetails, null, 2));
+		await this.backend.writeFile('/sync.lock', lockBytes).finished;
+
+		try {
+			const context = this.createSyncContext();
+
+			this.dispatchEvent(new CustomEvent('syncstart'));
+
+			try {
+				const result = await this.middleware.sync(context);
+				this.dispatchEvent(new CustomEvent('sync', { detail: result }));
+				return result;
+			} catch (err) {
+				if (err instanceof SyncConflictError) {
+					for (const conflict of err.conflicts) {
+						this.dispatchEvent(new CustomEvent('conflict', { detail: conflict }));
+					}
+				}
+				this.dispatchEvent(new CustomEvent('error', { detail: err }));
+				throw err;
+			}
+		} finally {
+			try {
+				await this.backend.deleteFile('/sync.lock');
+			} catch {
+				// Ignore errors deleting lockfile on cleanup
+			}
+		}
+	});
+
+	/**
+	 * Defragments the database storage layout on support middleware.
+	 * Packs clean active files sequentially and prunes remote history chunks.
+	 */
+	public async consolidate(): Promise<void> {
+		const context = this.createSyncContext();
 
 		if (typeof (this.middleware as any).consolidate === 'function') {
 			await (this.middleware as any).consolidate(context);

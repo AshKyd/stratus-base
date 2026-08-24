@@ -54,6 +54,14 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 	}
 
 	/**
+	 * Checks whether the remote storage contains at least one 7z archive chunk.
+	 */
+	async isSetUp(context: StratusSyncContext): Promise<boolean> {
+		const chunks = await this.listRemoteChunks(context.backend);
+		return chunks.length > 0;
+	}
+
+	/**
 	 * Lists all remote chunks matching archive_chunk_*.7z, sorted numerically.
 	 */
 	private async listRemoteChunks(

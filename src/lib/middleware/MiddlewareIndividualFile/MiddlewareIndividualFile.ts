@@ -21,6 +21,16 @@ export class MiddlewareIndividualFile implements StratusMiddleware {
 		this.options = options;
 	}
 
+	/**
+	 * Checks whether the remote storage has any existing files or folders.
+	 * Any files or folders (ignoring sync.lock) indicate the base is already set up.
+	 */
+	async isSetUp(context: StratusSyncContext): Promise<boolean> {
+		const items = await context.backend.listDirectory('/');
+		const validItems = items.filter((item) => item.path !== '/sync.lock');
+		return validItems.length > 0;
+	}
+
 	private async listRemoteFilesRecursive(
 		backend: StorageBackend,
 		path: string
