@@ -5,18 +5,21 @@ export interface SevenZipEntry {
 	data: Uint8Array;
 }
 
-// The single-threaded build is vendored next to this module (no SharedArrayBuffer / worker
-// requirement, so no COOP/COEP headers needed). A static `new URL(...)` lets Vite emit the
-// .wasm as a hashed asset in browser builds, while Node resolves it straight from the
-// filesystem.
-const js7zWasmUrl = new URL('../vendor/js7z/js7z.wasm', import.meta.url);
+import js7zWasmAssetUrl from '../vendor/js7z/js7z.wasm?url';
+
+// In Node.js testing/CLI, import.meta.url resolves the filesystem URL. In browser bundlers (Vite/Rollup),
+// `?url` instructs the bundler to emit the .wasm file into the build output assets and provide its URL.
+const js7zWasmUrl =
+	typeof js7zWasmAssetUrl === 'string' && js7zWasmAssetUrl.length > 0
+		? js7zWasmAssetUrl
+		: new URL('../vendor/js7z/js7z.wasm', import.meta.url).href;
 
 /** The resolved js7z.wasm asset URL, exposed for diagnostics/logging. */
-export const JS7Z_WASM_URL = js7zWasmUrl.href;
+export const JS7Z_WASM_URL = js7zWasmUrl;
 
 /** Resolve the .wasm asset URL for js7z. */
 function locateFile(path: string): string {
-	return path.endsWith('.wasm') ? js7zWasmUrl.href : path;
+	return path.endsWith('.wasm') ? js7zWasmUrl : path;
 }
 
 const isNode = typeof process !== 'undefined' && !!process.versions?.node;
