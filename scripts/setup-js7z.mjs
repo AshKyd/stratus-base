@@ -3,7 +3,11 @@
 // GitHub release. The build artifacts (js7z.cjs, js7z.mjs, js7z.wasm) are gitignored —
 // this script is what reproduces them locally. Runs automatically before dev/build/test
 // (see package.json); safe to re-run, and skips work if the files already exist.
-import { $, fs, path, tempdir } from 'zx';
+import { $, fs, path, tempdir, quote } from 'zx';
+
+// Fallback to /bin/sh and standard quoting if bash is not installed (e.g. Alpine without bash)
+$.shell = $.shell || '/bin/sh';
+$.quote = $.quote || quote;
 
 const JS7Z_VERSION = '2.5.0';
 // Single-threaded + extended filesystem + exception catching — no SharedArrayBuffer/worker
@@ -55,7 +59,7 @@ await fs.ensureDir(VENDOR_DIR);
 await Promise.all([
 	fs.writeFile(path.join(VENDOR_DIR, 'js7z.cjs'), cjsSource),
 	fs.writeFile(path.join(VENDOR_DIR, 'js7z.mjs'), mjsSource),
-	fs.copyFile(path.join(workDir, 'js7z.wasm'), path.join(VENDOR_DIR, 'js7z.wasm'))
+	fs.writeFile(path.join(VENDOR_DIR, 'js7z.wasm'), path.join(workDir, 'js7z.wasm'))
 ]);
 await fs.remove(workDir);
 
