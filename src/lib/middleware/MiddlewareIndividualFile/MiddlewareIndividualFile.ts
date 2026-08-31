@@ -60,6 +60,11 @@ export class MiddlewareIndividualFile implements StratusMiddleware {
 	}
 
 	async sync(context: StratusSyncContext): Promise<SyncResult> {
+		context.reportProgress({
+			phase: 'listing',
+			message: 'Listing remote files...'
+		});
+
 		const remoteFiles = (await this.listRemoteFilesRecursive(context.backend, '/'))
 			.filter((rf) => rf.path !== '/sync.lock');
 		const remoteMap = new Map<string, StorageFileInfo>();
@@ -75,6 +80,9 @@ export class MiddlewareIndividualFile implements StratusMiddleware {
 		const created: string[] = [];
 		const updated: string[] = [];
 		const deleted: string[] = [];
+
+		const totalFiles = allPaths.size;
+		let processedFiles = 0;
 
 		for (const path of allPaths) {
 			const remoteFile = remoteMap.get(path);
@@ -94,7 +102,29 @@ export class MiddlewareIndividualFile implements StratusMiddleware {
 					};
 					created.push(path);
 				} else {
+					context.reportProgress({
+						phase: 'downloading',
+						totalFiles,
+						completedFiles: processedFiles,
+						totalBytes: remoteFile.size,
+						loadedBytes: 0,
+						currentFile: path,
+						message: `Downloading ${path}...`
+					});
 					const op = context.backend.readFile(path);
+					op.on('progress', ({ loaded, total }) => {
+						const percentage = total > 0 ? Math.min(100, Math.round((loaded / total) * 100)) : 0;
+						context.reportProgress({
+							phase: 'downloading',
+							totalFiles,
+							completedFiles: processedFiles,
+							totalBytes: total,
+							loadedBytes: loaded,
+							percentage,
+							currentFile: path,
+							message: `Downloading ${path}...`
+						});
+					});
 					const content = await op.finished;
 					await context.writeLocalFile(path, content);
 					localFiles[path] = {
@@ -116,7 +146,30 @@ export class MiddlewareIndividualFile implements StratusMiddleware {
 				} else if (localFile.status === 'dirty') {
 					// Case B: Local only (created locally, not yet on remote)
 					const content = await context.readLocalFile(path);
+					context.reportProgress({
+						phase: 'uploading',
+						totalFiles,
+						completedFiles: processedFiles,
+						totalBytes: content.length,
+						loadedBytes: 0,
+						currentFile: path,
+						message: `Uploading ${path}...`
+					});
 					const op = context.backend.writeFile(path, content, { atomic: this.options.atomic });
+					op.on('progress', ({ loaded, total }) => {
+						const totalBytes = total || content.length;
+						const percentage = totalBytes > 0 ? Math.min(100, Math.round((loaded / totalBytes) * 100)) : 0;
+						context.reportProgress({
+							phase: 'uploading',
+							totalFiles,
+							completedFiles: processedFiles,
+							totalBytes,
+							loadedBytes: loaded,
+							percentage,
+							currentFile: path,
+							message: `Uploading ${path}...`
+						});
+					});
 					await op.finished;
 
 					const stat = await context.backend.stat(path);
@@ -237,9 +290,16 @@ export class MiddlewareIndividualFile implements StratusMiddleware {
 				}
 				// Subcase C4: Remote NOT Changed AND Local NOT Modified - do nothing
 			}
+			processedFiles++;
 		}
 
 		await context.saveLocalMetadata(metadata);
+
+		context.reportProgress({
+			phase: 'complete',
+			percentage: 100,
+			message: 'Synchronisation complete.'
+		});
 
 		if (conflicts.length > 0) {
 			throw new SyncConflictError(conflicts);

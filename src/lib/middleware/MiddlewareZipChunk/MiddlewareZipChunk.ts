@@ -263,7 +263,29 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 		filesMap.set('.metadata.json', metaContent);
 
 		const zipBytes = await this.encodeZip(filesMap);
+		context.reportProgress({
+			phase: 'uploading',
+			totalBytes: zipBytes.length,
+			loadedBytes: 0,
+			currentFile: chunkPath,
+			percentage: 0,
+			message: `Uploading ${chunkPath}...`
+		});
+
 		const op = context.backend.writeFile(chunkPath, zipBytes, { atomic: this.atomic });
+		op.on('progress', ({ loaded, total }) => {
+			const totalBytes = total || zipBytes.length;
+			const percentage = totalBytes > 0 ? Math.min(100, Math.round((loaded / totalBytes) * 100)) : 0;
+			context.reportProgress({
+				phase: 'uploading',
+				totalBytes,
+				loadedBytes: loaded,
+				percentage,
+				currentFile: chunkPath,
+				message: `Uploading ${chunkPath}...`
+			});
+		});
+
 		await op.finished;
 	}
 
@@ -272,14 +294,61 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 	 */
 	private async downloadAndExtractChunk(
 		context: StratusSyncContext,
-		rc: { path: string },
+		rc: { path: string; size?: number },
 		metadata: any,
 		conflicts: SyncConflict[],
 		created: string[],
-		updated: string[]
+		updated: string[],
+		progressTracker?: {
+			totalBytes: number;
+			totalChunks: number;
+			getCompletedBytes: () => number;
+			getCompletedChunks: () => number;
+			onChunkDownloadComplete: (chunkBytesLength: number) => void;
+		}
 	): Promise<void> {
 		const op = context.backend.readFile(rc.path);
+
+		if (progressTracker) {
+			op.on('progress', ({ loaded }) => {
+				const currentLoaded = progressTracker.getCompletedBytes() + loaded;
+				const totalBytes = progressTracker.totalBytes;
+				const percentage =
+					totalBytes > 0 ? Math.min(100, Math.round((currentLoaded / totalBytes) * 100)) : 0;
+
+				context.reportProgress({
+					phase: 'downloading',
+					totalBytes,
+					loadedBytes: currentLoaded,
+					totalFiles: progressTracker.totalChunks,
+					completedFiles: progressTracker.getCompletedChunks(),
+					percentage,
+					currentFile: rc.path,
+					message: `Downloading ${rc.path}...`
+				});
+			});
+		}
+
 		const bytes = await op.finished;
+		progressTracker?.onChunkDownloadComplete(bytes.length);
+
+		context.reportProgress({
+			phase: 'extracting',
+			totalBytes: progressTracker?.totalBytes,
+			loadedBytes: progressTracker ? progressTracker.getCompletedBytes() : bytes.length,
+			totalFiles: progressTracker?.totalChunks,
+			completedFiles: progressTracker?.getCompletedChunks(),
+			percentage:
+				progressTracker && progressTracker.totalBytes > 0
+					? Math.min(
+							100,
+							Math.round((progressTracker.getCompletedBytes() / progressTracker.totalBytes) * 100)
+						)
+					: 0,
+			currentFile: rc.path,
+			message: `Extracting ${rc.path}...`
+		});
+
 		const filesMap = await this.decodeZip(bytes);
 		const chunkMeta = this.parseChunkMetadata(filesMap);
 
@@ -543,6 +612,11 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 		const updated: string[] = [];
 		const deleted: string[] = [];
 
+		context.reportProgress({
+			phase: 'listing',
+			message: 'Checking remote chunks...'
+		});
+
 		const remoteChunks = await this.listRemoteChunks(context.backend);
 
 		// ==========================================
@@ -553,9 +627,43 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 			return !cached || cached.uncompressedSize === 0;
 		});
 
+		const totalChunks = chunksToDownload.length;
+		const totalBytes = chunksToDownload.reduce((acc, c) => acc + c.size, 0);
+		let completedBytes = 0;
+		let completedChunks = 0;
+
+		if (totalChunks > 0) {
+			context.reportProgress({
+				phase: 'downloading',
+				totalBytes,
+				loadedBytes: 0,
+				totalFiles: totalChunks,
+				completedFiles: 0,
+				percentage: 0,
+				message: `Downloading ${totalChunks} archive chunk(s)...`
+			});
+		}
+
 		await chunksToDownload.reduce(async (promise, rc) => {
 			await promise;
-			await this.downloadAndExtractChunk(context, rc, metadata, conflicts, created, updated);
+			await this.downloadAndExtractChunk(
+				context,
+				rc,
+				metadata,
+				conflicts,
+				created,
+				updated,
+				{
+					totalBytes,
+					totalChunks,
+					getCompletedBytes: () => completedBytes,
+					getCompletedChunks: () => completedChunks,
+					onChunkDownloadComplete: (chunkBytesLength: number) => {
+						completedBytes += rc.size || chunkBytesLength;
+						completedChunks++;
+					}
+				}
+			);
 		}, Promise.resolve());
 
 		// ==========================================
@@ -618,6 +726,12 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 		}
 
 		await context.saveLocalMetadata(metadata);
+
+		context.reportProgress({
+			phase: 'complete',
+			percentage: 100,
+			message: 'Synchronisation complete.'
+		});
 
 		if (conflicts.length > 0) {
 			throw new SyncConflictError(conflicts);

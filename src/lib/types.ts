@@ -14,6 +14,19 @@ export interface StorageAuthCredentials {
 	[key: string]: any; // Provider-specific metadata
 }
 
+export type SyncPhase = 'listing' | 'downloading' | 'extracting' | 'uploading' | 'complete';
+
+export interface SyncProgress {
+	phase: SyncPhase;
+	totalBytes?: number;
+	loadedBytes?: number;
+	totalFiles?: number;
+	completedFiles?: number;
+	percentage?: number;
+	currentFile?: string;
+	message?: string;
+}
+
 export interface StorageOperationEvents {
 	progress: (progress: { loaded: number; total: number }) => void;
 	retry: (error: Error, attempt: number, delayMs: number) => void;

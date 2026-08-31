@@ -650,6 +650,55 @@ test('StratusBase isConfigured delegates to backend.isConfigured', async () => {
 	assert.strictEqual(await stratus.isConfigured(), true);
 });
 
+test('StratusBase emits progress events via reportProgress and .on() listener', async () => {
+	const progressEvents: any[] = [];
+	const customMiddleware = {
+		async sync(context: any) {
+			context.reportProgress({
+				phase: 'listing',
+				message: 'Listing remote chunks...'
+			});
+			context.reportProgress({
+				phase: 'downloading',
+				totalBytes: 2048,
+				loadedBytes: 1024,
+				percentage: 50,
+				currentFile: '/archive_chunk_001.7z'
+			});
+			context.reportProgress({
+				phase: 'complete',
+				percentage: 100,
+				message: 'Synchronisation complete.'
+			});
+			return { created: [], updated: [], deleted: [] };
+		},
+		async isSetUp() {
+			return true;
+		}
+	};
 
+	const storageMock = new MockStorageManager();
+	setStorageManager(storageMock);
 
+	const backend = new MockBackend();
+	const stratus = new StratusBase({
+		backend,
+		localRoot: '/app',
+		middleware: customMiddleware
+	});
 
+	const unsubscribe = stratus.on('progress', (p) => {
+		progressEvents.push(p);
+	});
+
+	await stratus.sync();
+	unsubscribe();
+
+	assert.strictEqual(progressEvents.length, 3);
+	assert.strictEqual(progressEvents[0].phase, 'listing');
+	assert.strictEqual(progressEvents[1].phase, 'downloading');
+	assert.strictEqual(progressEvents[1].percentage, 50);
+	assert.strictEqual(progressEvents[1].loadedBytes, 1024);
+	assert.strictEqual(progressEvents[2].phase, 'complete');
+	assert.strictEqual(progressEvents[2].percentage, 100);
+});

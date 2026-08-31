@@ -114,7 +114,7 @@ export class MemoryStorage extends EventTarget implements StorageBackend {
 	 */
 	writeFile(path: string, content: Uint8Array, options?: WriteOptions): StorageOperation<void> {
 		const clean = this.cleanPath(path);
-		return new BaseStorageOperation(async (signal) => {
+		return new BaseStorageOperation(async (signal, onProgress) => {
 			if (signal.aborted) {
 				throw new DOMException('Operation aborted', 'AbortError');
 			}
@@ -127,6 +127,7 @@ export class MemoryStorage extends EventTarget implements StorageBackend {
 			if (options?.atomic) {
 				this.atomicWritesTracked.push(clean);
 			}
+			onProgress(content.length, content.length);
 		});
 	}
 

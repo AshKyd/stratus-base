@@ -291,15 +291,19 @@ export class DropboxStorage extends EventTarget implements StorageBackend {
 	 * @returns A cancellable StorageOperation yielding the binary content.
 	 */
 	readFile(path: string): StorageOperation<Uint8Array> {
-		return new BaseStorageOperation(async (signal) => {
+		return new BaseStorageOperation(async (signal, onProgress) => {
 			try {
 				const response = await this.client.filesDownload({ path }, { signal });
 				const result = response.result;
 				if (result.fileBinary) {
-					return new Uint8Array(result.fileBinary);
+					const bytes = new Uint8Array(result.fileBinary);
+					onProgress(bytes.length, bytes.length);
+					return bytes;
 				}
 				if (result.fileBlob) {
-					return new Uint8Array(await result.fileBlob.arrayBuffer());
+					const bytes = new Uint8Array(await result.fileBlob.arrayBuffer());
+					onProgress(bytes.length, bytes.length);
+					return bytes;
 				}
 				throw new Error('No content returned from filesDownload');
 			} catch (err) {
@@ -326,7 +330,7 @@ export class DropboxStorage extends EventTarget implements StorageBackend {
 	 * @returns A cancellable StorageOperation.
 	 */
 	writeFile(path: string, content: Uint8Array, options?: WriteOptions): StorageOperation<void> {
-		return new BaseStorageOperation(async (signal) => {
+		return new BaseStorageOperation(async (signal, onProgress) => {
 			try {
 				if (options?.atomic) {
 					const tempPath = `${path}.tmp`;
@@ -356,6 +360,7 @@ export class DropboxStorage extends EventTarget implements StorageBackend {
 					);
 					console.log(`[DropboxStorage.writeFile] upload complete: ${path}`);
 				}
+				onProgress(content.length, content.length);
 			} catch (err) {
 				if (isAuthError(err)) {
 					this.dispatchEvent(

@@ -14,7 +14,7 @@ export type { GithubStorageOptions } from './backends/GithubStorage.ts';
 export { S3Storage } from './backends/S3Storage.ts';
 export type { S3StorageOptions } from './backends/S3Storage.ts';
 
-export { StratusBase, SyncConflictError } from './StratusBase.ts';
+export { StratusBase, SyncConflictError, SyncLockedError } from './StratusBase.ts';
 export type {
 	FileMetadata,
 	StratusMetadata,
@@ -22,7 +22,10 @@ export type {
 	SyncResult,
 	StratusSyncContext,
 	StratusMiddleware,
-	StratusBaseOptions
+	StratusBaseOptions,
+	StratusBaseEventMap,
+	SyncPhase,
+	SyncProgress
 } from './StratusBase.ts';
 
 export { MiddlewareIndividualFile } from './middleware/MiddlewareIndividualFile/MiddlewareIndividualFile.ts';

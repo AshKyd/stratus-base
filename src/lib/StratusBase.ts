@@ -1,4 +1,4 @@
-import type { StorageBackend, StorageFileInfo, WriteOptions } from './types.ts';
+import type { StorageBackend, StorageFileInfo, WriteOptions, SyncPhase, SyncProgress } from './types.ts';
 import { debounceAsync } from './utils/debounceAsync.ts';
 import { normalize } from 'pathe';
 import {
@@ -6,6 +6,8 @@ import {
 	saveCredentials,
 	clearCredentials
 } from './utils/CredentialManager.ts';
+
+export type { SyncPhase, SyncProgress };
 
 export interface FileMetadata {
 	path: string;
@@ -74,6 +76,18 @@ export interface StratusSyncContext {
 	writeLocalFile(path: string, content: Uint8Array): Promise<void>;
 	deleteLocalFile(path: string): Promise<void>;
 	markClean(path: string, remoteModifiedAt: Date, etag?: string): Promise<void>;
+	reportProgress(progress: SyncProgress): void;
+}
+
+export interface StratusBaseEventMap {
+	syncstart: void;
+	sync: SyncResult;
+	progress: SyncProgress;
+	syncprogress: SyncProgress;
+	conflict: SyncConflict;
+	error: Error;
+	authrenewed: any;
+	reauthrequired: any;
 }
 
 export interface StratusMiddleware {
@@ -623,8 +637,41 @@ export class StratusBase extends EventTarget {
 					existing.etag = etag;
 					await this.saveMetadata(meta);
 				}
+			},
+			reportProgress: (progress: SyncProgress) => {
+				this.emit('progress', progress);
 			}
 		};
+	}
+
+	/**
+	 * Subscribes to a StratusBase lifecycle or sync event.
+	 * @returns An unsubscribe function.
+	 */
+	public on<E extends keyof StratusBaseEventMap>(
+		event: E,
+		callback: (payload: StratusBaseEventMap[E]) => void
+	): () => void {
+		const handler = (e: Event) => callback((e as CustomEvent).detail);
+		this.addEventListener(event, handler);
+		return () => {
+			this.removeEventListener(event, handler);
+		};
+	}
+
+	/**
+	 * Dispatches strongly-typed CustomEvents on the StratusBase EventTarget instance.
+	 */
+	public emit<E extends keyof StratusBaseEventMap>(
+		event: E,
+		payload?: StratusBaseEventMap[E]
+	): void {
+		this.dispatchEvent(new CustomEvent(event, { detail: payload }));
+		if (event === 'syncprogress') {
+			this.dispatchEvent(new CustomEvent('progress', { detail: payload }));
+		} else if (event === 'progress') {
+			this.dispatchEvent(new CustomEvent('syncprogress', { detail: payload }));
+		}
 	}
 
 	/**
@@ -708,7 +755,7 @@ export class StratusBase extends EventTarget {
 				}
 			}
 			const lockError = new SyncLockedError(lockDetails);
-			this.dispatchEvent(new CustomEvent('error', { detail: lockError }));
+			this.emit('error', lockError);
 			throw lockError;
 		}
 
@@ -724,19 +771,19 @@ export class StratusBase extends EventTarget {
 		try {
 			const context = this.createSyncContext();
 
-			this.dispatchEvent(new CustomEvent('syncstart'));
+			this.emit('syncstart');
 
 			try {
 				const result = await this.middleware.sync(context);
-				this.dispatchEvent(new CustomEvent('sync', { detail: result }));
+				this.emit('sync', result);
 				return result;
-			} catch (err) {
+			} catch (err: any) {
 				if (err instanceof SyncConflictError) {
 					for (const conflict of err.conflicts) {
-						this.dispatchEvent(new CustomEvent('conflict', { detail: conflict }));
+						this.emit('conflict', conflict);
 					}
 				}
-				this.dispatchEvent(new CustomEvent('error', { detail: err }));
+				this.emit('error', err);
 				throw err;
 			}
 		} finally {
