@@ -5,23 +5,6 @@ export interface SevenZipEntry {
 	data: Uint8Array;
 }
 
-import js7zWasmAssetUrl from '../vendor/js7z/js7z.wasm?url';
-
-// In Node.js testing/CLI, import.meta.url resolves the filesystem URL. In browser bundlers (Vite/Rollup),
-// `?url` instructs the bundler to emit the .wasm file into the build output assets and provide its URL.
-const js7zWasmUrl =
-	typeof js7zWasmAssetUrl === 'string' && js7zWasmAssetUrl.length > 0
-		? js7zWasmAssetUrl
-		: new URL('../vendor/js7z/js7z.wasm', import.meta.url).href;
-
-/** The resolved js7z.wasm asset URL, exposed for diagnostics/logging. */
-export const JS7Z_WASM_URL = js7zWasmUrl;
-
-/** Resolve the .wasm asset URL for js7z. */
-function locateFile(path: string): string {
-	return path.endsWith('.wasm') ? js7zWasmUrl : path;
-}
-
 const isNode = typeof process !== 'undefined' && !!process.versions?.node;
 
 // Two copies of the same vendored build are kept: `js7z.cjs` (real CommonJS, so Node's
@@ -29,7 +12,8 @@ const isNode = typeof process !== 'undefined' && !!process.versions?.node;
 // doesn't have to interop a local relative-path CJS file — which it does incorrectly,
 // throwing "doesn't provide an export named: 'default'"). Loaded lazily so neither module
 // is evaluated in the environment it isn't meant for.
-let js7zFactoryPromise: Promise<(moduleArg?: Record<string, unknown>) => Promise<JS7zInstance>> | undefined;
+let js7zFactoryPromise:
+	Promise<(moduleArg?: Record<string, unknown>) => Promise<JS7zInstance>> | undefined;
 
 function loadJS7zFactory() {
 	js7zFactoryPromise ??= isNode
@@ -39,6 +23,33 @@ function loadJS7zFactory() {
 			import(/* @vite-ignore */ '../vendor/js7z/js7z.cjs').then((mod) => mod.default)
 		: import('../vendor/js7z/js7z.mjs').then((mod) => mod.default);
 	return js7zFactoryPromise;
+}
+
+// The wasm is vendored base64-encoded inside a plain ESM module rather than shipped as a .wasm
+// asset. Emscripten takes the bytes directly via `wasmBinary`, so nothing downstream has to
+// resolve an asset URL at runtime — no `?url` import, no `locateFile`, no `import.meta.url`.
+// That keeps the published `dist/` free of bundler-specific syntax, so Vite, other bundlers and
+// plain Node all load it identically. Imported lazily so the ~2MB payload stays in its own async
+// chunk and is only fetched when an archive is actually read or written.
+let js7zWasmBinaryPromise: Promise<Uint8Array> | undefined;
+
+function loadJS7zWasmBinary() {
+	js7zWasmBinaryPromise ??= import('../vendor/js7z/js7z-wasm.js').then(({ default: base64 }) =>
+		// `atob` is a global in browsers and in Node 16+.
+		Uint8Array.from(atob(base64), (character) => character.charCodeAt(0))
+	);
+	return js7zWasmBinaryPromise;
+}
+
+/** Size in bytes of the decoded js7z wasm binary, exposed for diagnostics/logging. */
+export async function getJS7zWasmByteLength(): Promise<number> {
+	return (await loadJS7zWasmBinary()).length;
+}
+
+/** Loads the js7z glue and its wasm binary together, and instantiates the module. */
+async function createJS7z(): Promise<JS7zInstance> {
+	const [JS7z, wasmBinary] = await Promise.all([loadJS7zFactory(), loadJS7zWasmBinary()]);
+	return JS7z({ wasmBinary });
 }
 
 export class SevenZipWriter {
@@ -70,8 +81,7 @@ export class SevenZipWriter {
 	 * Finalizes compression, executes 7-Zip in MEMFS, and returns the final archive bytes.
 	 */
 	async finalize(): Promise<Uint8Array> {
-		const JS7z = await loadJS7zFactory();
-		const js7z = await JS7z({ locateFile });
+		const js7z = await createJS7z();
 
 		// Prepare workspace directories in virtual MEMFS
 		js7z.FS.mkdir('/in');
@@ -177,8 +187,7 @@ export class SevenZipReader {
 			offset += chunk.length;
 		}
 
-		const JS7z = await loadJS7zFactory();
-		const js7z = await JS7z({ locateFile });
+		const js7z = await createJS7z();
 
 		// Prepare directories
 		js7z.FS.mkdir('/in');

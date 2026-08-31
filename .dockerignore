@@ -1,0 +1,17 @@
+node_modules
+dist
+.svelte-kit
+.git
+.DS_Store
+scratch
+.vitest-attachments
+src/lib/__screenshots__
+debug.txt
+task.md
+*.7z
+
+# Always re-fetched inside the image, so the host's copy must not leak into the build context —
+# that is the whole point of the consumer test.
+src/lib/vendor/js7z/js7z.cjs
+src/lib/vendor/js7z/js7z.mjs
+src/lib/vendor/js7z/js7z-wasm.js

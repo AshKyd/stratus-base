@@ -118,9 +118,44 @@ await client.reset();
 
 `MiddlewareZipChunk` depends on a vendored js7z WASM build (`src/lib/vendor/js7z/`) that is
 **not committed** — it's fetched from the upstream [JS7z](https://github.com/GMH-Code/JS7z)
-release by `npm run setup:js7z` (see `scripts/setup-js7z.mjs`). `dev`, `build`, `test`, and
-`test:browser` all run this automatically first, so a plain `npm install` followed by any of
-those commands is enough; run it manually (add `--force` to refetch) if you need to.
+release by `npm run setup:js7z` (see `scripts/setup-js7z.mjs`). `prepare`, `dev`, `build`,
+`test`, and `test:browser` all run this automatically first, so a plain `npm install` is
+enough; run it manually (add `--force` to refetch) if you need to.
+
+The script uses **only Node builtins** — `fetch`, `node:zlib` and `node:crypto` — with no
+`curl`, `unzip` or third-party packages, because it runs during `npm install` on machines we
+don't control (CI, Docker images, and consumers installing straight from git). The download is
+pinned by version *and* SHA-256; a mismatch fails loudly rather than vendoring an unexpected
+build.
+
+It writes three plain `.js` files and no binary:
+
+| File | Purpose |
+| --- | --- |
+| `js7z.cjs` | Upstream UMD glue, loaded by Node (real CommonJS, so Node's interop works) |
+| `js7z.mjs` | Same glue with an `export default` appended, loaded by browsers/bundlers |
+| `js7z-wasm.js` | The WASM binary, base64-encoded into an ESM module |
+
+The wasm is handed to Emscripten as `Module.wasmBinary` rather than shipped as a `.wasm` asset.
+That means the published `dist/` contains no bundler-specific syntax (no `?url`), no
+`locateFile` and no `import.meta.url` path resolution, so Vite, other bundlers and plain Node
+all load it identically. `codec7z.ts` imports the payload lazily, so it stays in its own async
+chunk and is only downloaded when an archive is actually read or written.
+
+**Bumping the js7z version:** change `JS7Z_VERSION` in `scripts/setup-js7z.mjs`, run
+`npm run setup:js7z -- --force` (it will fail on the checksum), then update
+`JS7Z_RELEASE_SHA256` to the digest it reports and re-run.
+
+### Consumer install test
+
+`docker/Dockerfile.consumer-test` verifies from scratch that the package installs and builds in
+a real Vite app, and that the wasm ends up somewhere a browser can use it. It packs the library
+on a bare `node:26-alpine` (no `apk add`), installs the tarball into a minimal Vite fixture,
+builds it, then asserts the payload is in a lazy chunk and that a 7z round-trip actually works:
+
+```bash
+docker build -f docker/Dockerfile.consumer-test -t stratus-base-test .
+```
 
 ---
 

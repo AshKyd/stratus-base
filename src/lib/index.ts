@@ -34,7 +34,7 @@ export type {
 	SmokeTestStep,
 	SmokeTestStepReporter
 } from './middleware/MiddlewareZipChunk/MiddlewareZipChunk.ts';
-export { JS7Z_WASM_URL } from './utils/codec7z.ts';
+export { getJS7zWasmByteLength } from './utils/codec7z.ts';
 
 export { MemoryStorage } from './backends/MemoryStorage.ts';
 

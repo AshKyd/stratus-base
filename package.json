@@ -6,7 +6,7 @@
 		"dev": "npm run setup:js7z && vite dev",
 		"build": "npm run setup:js7z && vite build && npm run prepack",
 		"preview": "vite preview",
-		"prepare": "npm run setup:js7z && (svelte-kit sync || echo '') && (svelte-package || echo '')",
+		"prepare": "npm run setup:js7z && svelte-kit sync && svelte-package",
 		"prepack": "svelte-kit sync && svelte-package && publint",
 		"check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
 		"check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
@@ -31,7 +31,8 @@
 	"exports": {
 		".": {
 			"types": "./dist/index.d.ts",
-			"svelte": "./dist/index.js"
+			"svelte": "./dist/index.js",
+			"default": "./dist/index.js"
 		}
 	},
 	"peerDependencies": {
@@ -44,32 +45,31 @@
 		"@sveltejs/package": "^2.5.8",
 		"@sveltejs/vite-plugin-svelte": "^7.1.2",
 		"@types/node": "^24",
+		"@vitest/browser": "^4.1.10",
 		"@vitest/browser-playwright": "^4.1.10",
 		"eslint": "^10.4.1",
 		"eslint-config-prettier": "^10.1.8",
 		"eslint-plugin-svelte": "^3.19.0",
 		"globals": "^17.6.0",
+		"playwright": "^1.62.1",
 		"prettier": "^3.8.3",
 		"prettier-plugin-svelte": "^4.1.0",
 		"publint": "^0.3.21",
+		"s3rver": "^3.7.1",
 		"svelte": "^5.56.1",
 		"svelte-akui": "github:AshKyd/svelte-akui",
 		"svelte-check": "^4.6.0",
 		"typescript": "^6.0.3",
 		"typescript-eslint": "^8.60.1",
-		"vite": "^8.0.16"
+		"vite": "^8.0.16",
+		"vitest": "^4.1.10"
 	},
 	"keywords": [
 		"svelte"
 	],
 	"dependencies": {
 		"@aws-sdk/client-s3": "^3.1111.0",
-		"@vitest/browser": "^4.1.10",
 		"dropbox": "^10.45.0",
-		"pathe": "^2.0.3",
-		"playwright": "^1.62.1",
-		"s3rver": "^3.7.1",
-		"vitest": "^4.1.10",
-		"zx": "^8.8.5"
+		"pathe": "^2.0.3"
 	}
 }

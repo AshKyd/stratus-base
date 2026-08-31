@@ -1,6 +1,4 @@
-import type {
-	StorageBackend
-} from '../../types.ts';
+import type { StorageBackend } from '../../types.ts';
 import type {
 	StratusMiddleware,
 	StratusSyncContext,
@@ -9,18 +7,18 @@ import type {
 	ChunkMetadata
 } from '../../StratusBase.ts';
 import { SyncConflictError } from '../../StratusBase.ts';
-import { SevenZipWriter, SevenZipReader, JS7Z_WASM_URL } from '../../utils/codec7z.ts';
+import { SevenZipWriter, SevenZipReader, getJS7zWasmByteLength } from '../../utils/codec7z.ts';
 import { normalize } from 'pathe';
 
 export interface MiddlewareZipChunkOptions {
 	chunkSizeLimit?: number; // Target chunk size limit, default 5MB
-	atomic?: boolean;        // Perform atomic writes on backend if supported
-	password?: string;       // Password for AES-256 encryption (required)
+	atomic?: boolean; // Perform atomic writes on backend if supported
+	password?: string; // Password for AES-256 encryption (required)
 }
 
 /** Ordered steps the 7z smoke test walks through, for step-by-step debug logging. */
 export type SmokeTestStep =
-	| 'resolve-wasm-url'
+	| 'decode-wasm-binary'
 	| 'construct-writer'
 	| 'write-entry'
 	| 'finalize-archive'
@@ -120,12 +118,16 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 			}
 		};
 
-		// 0. Surface the resolved wasm asset URL before touching any wasm code, so a
-		// misconfigured build (wrong base path, missing asset, 404) is visible up front.
-		await runStep('resolve-wasm-url', undefined, () => JS7Z_WASM_URL);
+		// 0. Decode the wasm binary before touching any wasm code, so a build that dropped or
+		// mangled the vendored payload is visible up front rather than as a later hang.
+		await runStep('decode-wasm-binary', undefined, () => getJS7zWasmByteLength());
 
 		// 1. Build archive in memory
-		const writer = await runStep('construct-writer', undefined, () => new SevenZipWriter(this.password));
+		const writer = await runStep(
+			'construct-writer',
+			undefined,
+			() => new SevenZipWriter(this.password)
+		);
 		await runStep('write-entry', { path: testName, size: testContent.length }, () =>
 			writer.write({ path: testName, data: testContent })
 		);
@@ -139,7 +141,7 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 						() =>
 							reject(
 								new Error(
-									`[7z] finalize timed out after 30s — check that ${JS7Z_WASM_URL} resolves correctly`
+									'[7z] finalize timed out after 30s — the js7z wasm module likely failed to instantiate'
 								)
 							),
 						30_000
@@ -149,8 +151,14 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 		);
 
 		// 3. Read back and verify
-		const reader = await runStep('construct-reader', undefined, () => new SevenZipReader(this.password));
-		await runStep('append-chunk', { size: archiveBytes.length }, () => reader.appendChunk(archiveBytes));
+		const reader = await runStep(
+			'construct-reader',
+			undefined,
+			() => new SevenZipReader(this.password)
+		);
+		await runStep('append-chunk', { size: archiveBytes.length }, () =>
+			reader.appendChunk(archiveBytes)
+		);
 
 		const entries = await runStep('extract-archive', undefined, async () => {
 			const collected: { path: string; data: Uint8Array }[] = [];
@@ -204,9 +212,12 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 		const reader = new SevenZipReader(this.password);
 		await reader.appendChunk(zipBytes);
 		for await (const entry of reader.extract()) {
-			const filename = entry.path === '.metadata.json'
-				? '.metadata.json'
-				: (entry.path.startsWith('/') ? entry.path : '/' + entry.path);
+			const filename =
+				entry.path === '.metadata.json'
+					? '.metadata.json'
+					: entry.path.startsWith('/')
+						? entry.path
+						: '/' + entry.path;
 			filesMap.set(filename, entry.data);
 		}
 		return filesMap;
@@ -282,10 +293,12 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 				const path = normalize(entryPath).replace(/^\/+/, '');
 				const localFiles = metadata.files;
 				const localFile = localFiles[path];
-				const remoteFileMeta = chunkMeta.files[path] || chunkMeta.files[entryPath] || chunkMeta.files['/' + path];
+				const remoteFileMeta =
+					chunkMeta.files[path] || chunkMeta.files[entryPath] || chunkMeta.files['/' + path];
 				const remoteModifiedAt = remoteFileMeta?.modifiedAt ?? Date.now();
 
-				const isLocalModified = localFile && (localFile.status === 'dirty' || localFile.status === 'deleted');
+				const isLocalModified =
+					localFile && (localFile.status === 'dirty' || localFile.status === 'deleted');
 
 				if (!isLocalModified) {
 					// Non-modified locally, safe to extract/lazy-load
@@ -401,17 +414,17 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 		deleted: string[]
 	): Promise<void> {
 		const localFiles = metadata.files;
-		
+
 		let currentChunkNum = initialChunkNum;
 		let currentChunkPath = initialChunkPath;
 		let currentChunk = { ...initialChunk };
-		
+
 		// Ensure internal structures are clean
 		currentChunk.files = { ...(currentChunk.files || {}) };
 		currentChunk.deleted = [...(currentChunk.deleted || [])];
 
 		let activeExists = remoteChunks.some((c) => c.path === currentChunkPath);
-		
+
 		let filesMap = new Map<string, Uint8Array>();
 		if (activeExists) {
 			const op = context.backend.readFile(currentChunkPath);
@@ -431,7 +444,10 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 
 			// If adding this file meets or exceeds the threshold and we already have files in the current chunk, rollover
 			const currentSize = currentChunk.uncompressedSize;
-			if (currentSize + content.length >= this.chunkSizeLimit && (filesMap.size > 0 || Object.keys(currentChunk.files).length > 0)) {
+			if (
+				currentSize + content.length >= this.chunkSizeLimit &&
+				(filesMap.size > 0 || Object.keys(currentChunk.files).length > 0)
+			) {
 				// 1. Write the current chunk to backend
 				currentChunk.deleted = Array.from(cumulativeDeleted);
 				currentChunk.uncompressedSize = Array.from(filesMap.entries())
@@ -458,7 +474,7 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 			// Add/overwrite file in the current chunk
 			const normalizedPath = normalize(path).replace(/^\/+/, '');
 			filesMap.set(normalizedPath, content);
-			
+
 			const isNew = !currentChunk.files[normalizedPath];
 			if (isNew) {
 				created.push(normalizedPath);
@@ -480,11 +496,11 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 
 			cumulativeDeleted.delete(path);
 			currentChunk.deleted = Array.from(cumulativeDeleted);
-			
+
 			currentChunk.uncompressedSize = Array.from(filesMap.entries())
 				.filter(([name]) => name !== '.metadata.json')
 				.reduce((acc, [, bytes]) => acc + bytes.length, 0);
-				
+
 			hasUnwrittenChanges = true;
 		}, Promise.resolve());
 
@@ -648,7 +664,10 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 			const fileMeta = localFiles[path];
 
 			// If adding this file exceeds the threshold and we already have files in the current chunk, close it and start a new one
-			if (currentChunkMeta.uncompressedSize + content.length >= this.chunkSizeLimit && currentFilesMap.size > 0) {
+			if (
+				currentChunkMeta.uncompressedSize + content.length >= this.chunkSizeLimit &&
+				currentFilesMap.size > 0
+			) {
 				// Serialize metadata and write the current temp chunk
 				currentChunkMeta.uncompressedSize = Array.from(currentFilesMap.entries())
 					.filter(([name]) => name !== '.metadata.json')
