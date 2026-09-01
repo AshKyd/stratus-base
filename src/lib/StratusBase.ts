@@ -1,6 +1,6 @@
 import type { StorageBackend, StorageFileInfo, WriteOptions, SyncPhase, SyncProgress } from './types.ts';
 import { debounceAsync } from './utils/debounceAsync.ts';
-import { normalize } from 'pathe';
+import { normalisePath } from './utils/normalisePath.ts';
 import {
 	loadCredentials,
 	saveCredentials,
@@ -28,6 +28,9 @@ export interface ChunkMetadata {
 	uncompressedSize: number;
 	files: Record<string, ChunkFileMetadata>;
 	deleted?: string[];
+	remoteModifiedAt?: number;
+	remoteSize?: number;
+	etag?: string;
 }
 
 export interface StratusMetadata {
@@ -279,10 +282,51 @@ export class StratusBase extends EventTarget {
 			if (!text.trim()) {
 				return { files: {} };
 			}
-			return JSON.parse(text);
+			return this.canonicaliseMetadata(JSON.parse(text));
 		} catch {
 			return { files: {} };
 		}
+	}
+
+	/**
+	 * Re-keys a freshly parsed metadata document onto canonical paths.
+	 *
+	 * Older clients wrote file and chunk keys in whichever form the calling code happened to use
+	 * (`Notes/x.md` or `/Notes/x.md`), so the same file could occupy two entries and never match its
+	 * remote chunk entry. Normalising here — the only place metadata is parsed — means the rest of the
+	 * codebase can assume one key per file, and the migrated shape persists on the next `saveMetadata`.
+	 */
+	private canonicaliseMetadata(metadata: StratusMetadata): StratusMetadata {
+		const files = Object.entries(metadata.files ?? {}).reduce<Record<string, FileMetadata>>(
+			(acc, [key, file]) => {
+				const path = normalisePath(file?.path ?? key);
+				acc[path] = { ...file, path };
+				return acc;
+			},
+			{}
+		);
+
+		if (!metadata.chunks) return { ...metadata, files };
+
+		const chunks = Object.entries(metadata.chunks).reduce<Record<string, ChunkMetadata>>(
+			(acc, [chunkPath, chunk]) => {
+				acc[normalisePath(chunkPath)] = {
+					...chunk,
+					files: Object.entries(chunk.files ?? {}).reduce<Record<string, ChunkFileMetadata>>(
+						(entries, [entryPath, entry]) => {
+							entries[normalisePath(entryPath)] = entry;
+							return entries;
+						},
+						{}
+					),
+					deleted: chunk.deleted?.map(normalisePath)
+				};
+				return acc;
+			},
+			{}
+		);
+
+		return { ...metadata, files, chunks };
 	}
 
 	/**
@@ -305,19 +349,9 @@ export class StratusBase extends EventTarget {
 	 * Returns null if the file does not exist locally or is flagged as deleted.
 	 * @param path Relative path to the target file.
 	 */
-	private normalizePath(path: string): string {
-		return normalize(path).replace(/^\/+/, '');
-	}
-
-	/**
-	 * Checks status and gets metadata for a local file.
-	 * Returns null if the file does not exist locally or is flagged as deleted.
-	 * @param path Relative path to the target file.
-	 */
 	public async stat(path: string): Promise<StorageFileInfo | null> {
 		const metadata = await this.getMetadata();
-		const cleanPath = this.normalizePath(path);
-		const fileMeta = metadata.files[cleanPath] || metadata.files['/' + cleanPath] || metadata.files[path];
+		const fileMeta = metadata.files[normalisePath(path)];
 
 		if (!fileMeta || fileMeta.status === 'deleted') {
 			return null;
@@ -340,8 +374,7 @@ export class StratusBase extends EventTarget {
 	 */
 	public async readFile(path: string): Promise<Uint8Array> {
 		const metadata = await this.getMetadata();
-		const cleanPath = this.normalizePath(path);
-		const fileMeta = metadata.files[cleanPath] || metadata.files['/' + cleanPath] || metadata.files[path];
+		const fileMeta = metadata.files[normalisePath(path)];
 
 		if (!fileMeta || fileMeta.status === 'deleted') {
 			throw new Error(`File not found: ${path}`);
@@ -381,8 +414,8 @@ export class StratusBase extends EventTarget {
 		options?: WriteOptions
 	): Promise<void> {
 		const metadata = await this.getMetadata();
-		const cleanPath = this.normalizePath(path);
-		const existing = metadata.files[cleanPath] || metadata.files['/' + cleanPath] || metadata.files[path];
+		const cleanPath = normalisePath(path);
+		const existing = metadata.files[cleanPath];
 
 		// Check if content has actually changed by reading existing file first
 		let hasContentChanged = true;
@@ -405,8 +438,8 @@ export class StratusBase extends EventTarget {
 		await writable.write(content as BufferSource);
 		await writable.close();
 
-		metadata.files[path] = {
-			path,
+		metadata.files[cleanPath] = {
+			path: cleanPath,
 			type: 'file',
 			size: content.length,
 			localModifiedAt: Date.now(),
@@ -450,8 +483,8 @@ export class StratusBase extends EventTarget {
 	 */
 	public async deleteFile(path: string): Promise<void> {
 		const metadata = await this.getMetadata();
-		const cleanPath = this.normalizePath(path);
-		const existing = metadata.files[cleanPath] || metadata.files['/' + cleanPath] || metadata.files[path];
+		const cleanPath = normalisePath(path);
+		const existing = metadata.files[cleanPath];
 		if (!existing) return;
 
 		try {
@@ -470,9 +503,6 @@ export class StratusBase extends EventTarget {
 
 		existing.status = 'deleted';
 		existing.localModifiedAt = Date.now();
-		if (metadata.files[cleanPath]) metadata.files[cleanPath].status = 'deleted';
-		if (metadata.files['/' + cleanPath]) metadata.files['/' + cleanPath].status = 'deleted';
-		if (metadata.files[path]) metadata.files[path].status = 'deleted';
 
 		await this.saveMetadata(metadata);
 	}
@@ -484,21 +514,16 @@ export class StratusBase extends EventTarget {
 	 */
 	public async listDirectory(path: string): Promise<StorageFileInfo[]> {
 		const metadata = await this.getMetadata();
-		const prefix = path.endsWith('/') ? path : path + '/';
-		const targetDir = path === '/' ? '/' : path;
+		// Root normalises to '/', so the prefix would otherwise double up as '//'
+		const cleanPath = normalisePath(path);
+		const prefix = cleanPath === '/' ? '/' : cleanPath + '/';
 
 		return Object.values(metadata.files)
 			.filter((file) => {
 				if (file.status === 'deleted') return false;
-				if (targetDir === '/') {
-					const parts = file.path.split('/').filter(Boolean);
-					return parts.length === 1;
-				} else {
-					if (!file.path.startsWith(prefix)) return false;
-					const subPath = file.path.slice(prefix.length);
-					const parts = subPath.split('/').filter(Boolean);
-					return parts.length === 1;
-				}
+				if (!file.path.startsWith(prefix)) return false;
+				// Non-recursive: only direct children, so exactly one segment below the prefix
+				return file.path.slice(prefix.length).split('/').filter(Boolean).length === 1;
 			})
 			.map((file) => ({
 				path: file.path,
@@ -517,7 +542,9 @@ export class StratusBase extends EventTarget {
 	 */
 	public async renameFile(oldPath: string, newPath: string): Promise<void> {
 		const metadata = await this.getMetadata();
-		const existing = metadata.files[oldPath];
+		const cleanOldPath = normalisePath(oldPath);
+		const cleanNewPath = normalisePath(newPath);
+		const existing = metadata.files[cleanOldPath];
 		if (!existing || existing.status === 'deleted') {
 			throw new Error(`File not found: ${oldPath}`);
 		}
@@ -549,12 +576,12 @@ export class StratusBase extends EventTarget {
 			// Ignore local file deletion errors
 		}
 
-		// Update metadata
+		// Update metadata: the old path stays as a tombstone so the deletion propagates on next sync
 		existing.status = 'deleted';
 		existing.localModifiedAt = Date.now();
 
-		metadata.files[newPath] = {
-			path: newPath,
+		metadata.files[cleanNewPath] = {
+			path: cleanNewPath,
 			type: 'file',
 			size: content.length,
 			localModifiedAt: Date.now(),
@@ -630,7 +657,7 @@ export class StratusBase extends EventTarget {
 			},
 			markClean: async (path, remoteModifiedAt, etag) => {
 				const meta = await this.getMetadata();
-				const existing = meta.files[path];
+				const existing = meta.files[normalisePath(path)];
 				if (existing) {
 					existing.status = 'clean';
 					existing.remoteModifiedAt = remoteModifiedAt.getTime();
@@ -820,7 +847,13 @@ export class StratusBase extends EventTarget {
 	}
 
 	/**
-	 * Prunes the local OPFS copy of a conflict file and removes it from metadata structures.
+	 * Prunes the local OPFS copy of a conflict file and tombstones its metadata entry.
+	 *
+	 * The entry is marked `deleted` rather than dropped outright because a deletion only reaches other
+	 * clients as a tombstone. Conflict sidecars do get pushed to the remote — `consolidate()` packs
+	 * them, since an unresolved conflict deliberately keeps both versions — so dropping the record here
+	 * would let the next download of that chunk see a remote file with no local entry and recreate the
+	 * sidecar the person just resolved away. The push clears the tombstone once it has propagated.
 	 */
 	private async deleteLocalFileRecord(metadata: StratusMetadata, path: string): Promise<void> {
 		try {
@@ -836,7 +869,13 @@ export class StratusBase extends EventTarget {
 		} catch {
 			// File might already not exist locally
 		}
-		delete metadata.files[path];
+
+		const cleanPath = normalisePath(path);
+		const existing = metadata.files[cleanPath];
+		if (!existing) return;
+
+		existing.status = 'deleted';
+		existing.localModifiedAt = Date.now();
 	}
 
 	/**
@@ -848,7 +887,7 @@ export class StratusBase extends EventTarget {
 	 */
 	public async resolveConflict(path: string, content: Uint8Array): Promise<void> {
 		const metadata = await this.getMetadata();
-		const fileMeta = metadata.files[path];
+		const fileMeta = metadata.files[normalisePath(path)];
 		if (!fileMeta || fileMeta.status !== 'conflict') {
 			throw new Error(`File is not in conflict status: ${path}`);
 		}

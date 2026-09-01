@@ -195,7 +195,8 @@ export class MemoryStorage extends EventTarget implements StorageBackend {
 						name: nextSegment,
 						type: 'file',
 						size: file.content.length,
-						modifiedAt: file.modifiedAt
+						modifiedAt: file.modifiedAt,
+						etag: file.etag
 					});
 				}
 			}

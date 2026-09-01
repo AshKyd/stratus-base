@@ -582,7 +582,7 @@ export class GoogleDriveStorage extends EventTarget implements StorageBackend {
 			const fileId = await this.resolvePath(path);
 			if (!fileId) return null;
 
-			const url = `https://www.googleapis.com/drive/v3/files/${fileId}?fields=id,name,mimeType,size,modifiedTime`;
+			const url = `https://www.googleapis.com/drive/v3/files/${fileId}?fields=id,name,mimeType,size,modifiedTime,md5Checksum,headRevisionId`;
 			const res = await this.fetchWithAuth(url);
 
 			if (res.status === 404) {
@@ -602,7 +602,9 @@ export class GoogleDriveStorage extends EventTarget implements StorageBackend {
 				type: isDir ? 'directory' : 'file',
 				size: isDir ? 0 : Number(file.size || 0),
 				modifiedAt: file.modifiedTime ? new Date(file.modifiedTime) : new Date(0),
-				etag: file.id
+				// Must match the etag field `listDirectory` reports, or freshness checks that compare a
+				// stat against a listing would see a change on every sync.
+				etag: file.md5Checksum ?? file.headRevisionId
 			};
 		} catch {
 			return null;
@@ -788,7 +790,8 @@ export class GoogleDriveStorage extends EventTarget implements StorageBackend {
 			const q = `'${dirId}' in parents and trashed = false`;
 			const params = new URLSearchParams({
 				q,
-				fields: 'nextPageToken, files(id, name, mimeType, size, modifiedTime)'
+				fields:
+					'nextPageToken, files(id, name, mimeType, size, modifiedTime, md5Checksum, headRevisionId)'
 			});
 			if (pageToken) {
 				params.set('pageToken', pageToken);
@@ -828,7 +831,9 @@ export class GoogleDriveStorage extends EventTarget implements StorageBackend {
 				type: isDir ? 'directory' : 'file',
 				size: isDir ? 0 : Number(file.size || 0),
 				modifiedAt: file.modifiedTime ? new Date(file.modifiedTime) : new Date(0),
-				etag: file.id
+				// The Drive file id is stable across edits, so it can never signal a content change.
+				// md5Checksum changes with every upload; headRevisionId covers files Drive won't hash.
+				etag: file.md5Checksum ?? file.headRevisionId
 			};
 		});
 	}

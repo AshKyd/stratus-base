@@ -309,9 +309,12 @@ test('StratusBase conflict resolution', async (t) => {
 	const resolvedContent = new TextEncoder().encode('Merged Content');
 	await stratus.resolveConflict('/conflict.txt', resolvedContent);
 
-	// Check updates file is deleted and metadata is removed
+	// The updates file is tombstoned rather than dropped, so the deletion reaches other clients
+	// instead of the sidecar being recreated from the remote on the next download.
 	const postMeta = await stratus.getMetadata();
-	assert.strictEqual(postMeta.files['/conflict_updates.txt'], undefined);
+	assert.strictEqual(postMeta.files['/conflict_updates.txt'].status, 'deleted');
+	// A tombstoned sidecar must not be readable or listed any more
+	assert.strictEqual(await stratus.stat('/conflict_updates.txt'), null);
 	assert.ok(postMeta.files['/conflict.txt']);
 	assert.strictEqual(postMeta.files['/conflict.txt'].status, 'dirty');
 	assert.strictEqual(postMeta.files['/conflict.txt'].size, resolvedContent.length);

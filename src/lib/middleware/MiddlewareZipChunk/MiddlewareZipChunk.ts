@@ -1,4 +1,4 @@
-import type { StorageBackend } from '../../types.ts';
+import type { StorageBackend, StorageFileInfo } from '../../types.ts';
 import type {
 	StratusMiddleware,
 	StratusSyncContext,
@@ -8,7 +8,15 @@ import type {
 } from '../../StratusBase.ts';
 import { SyncConflictError } from '../../StratusBase.ts';
 import { SevenZipWriter, SevenZipReader, getJS7zWasmByteLength } from '../../utils/codec7z.ts';
-import { normalize } from 'pathe';
+import { normalisePath } from '../../utils/normalisePath.ts';
+
+/** What the remote listing tells us about a chunk, used to decide whether our cached copy is stale. */
+interface RemoteChunkInfo {
+	path: string;
+	size?: number;
+	modifiedAt?: Date;
+	etag?: string;
+}
 
 export interface MiddlewareZipChunkOptions {
 	chunkSizeLimit?: number; // Target chunk size limit, default 5MB
@@ -65,21 +73,67 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 	 */
 	private async listRemoteChunks(
 		backend: StorageBackend
-	): Promise<{ path: string; num: number; size: number; modifiedAt: Date }[]> {
+	): Promise<(RemoteChunkInfo & { num: number })[]> {
 		const files = await backend.listDirectory('/');
 		const chunkRegex = /^archive_chunk_(\d+)\.7z$/;
 		return files
 			.filter((f) => f.type === 'file' && chunkRegex.test(f.name))
 			.map((f) => {
-				const match = f.name.match(chunkRegex);
+				const [, num] = f.name.match(chunkRegex) || [];
 				return {
-					path: f.path,
-					num: match ? Number(match[1]) : 0,
+					path: normalisePath(f.path),
+					num: Number(num ?? 0),
 					size: f.size,
-					modifiedAt: f.modifiedAt
+					modifiedAt: f.modifiedAt,
+					etag: f.etag
 				};
 			})
 			.sort((a, b) => a.num - b.num);
+	}
+
+	/**
+	 * Records what the backend reports about a chunk we have just written, so the next sync recognises
+	 * our own upload instead of downloading it back.
+	 *
+	 * `remoteModifiedAt` is deliberately left undefined when the backend gives us no timestamp: stamping
+	 * a local `Date.now()` here would make a chunk look permanently newer than the server's own clock,
+	 * and `isChunkStale` would then skip it forever.
+	 *
+	 * @param stat Backend metadata for the uploaded chunk, or null if the backend could not report it.
+	 * @param fallbackSize Byte length of the archive we uploaded, used when the backend omits a size.
+	 */
+	private chunkRemoteInfo(
+		stat: StorageFileInfo | null,
+		fallbackSize: number
+	): Pick<ChunkMetadata, 'remoteModifiedAt' | 'remoteSize' | 'etag'> {
+		return {
+			remoteModifiedAt: stat?.modifiedAt ? stat.modifiedAt.getTime() : undefined,
+			remoteSize: stat?.size ?? fallbackSize,
+			etag: stat?.etag
+		};
+	}
+
+	/**
+	 * Decides whether a remote chunk must be re-downloaded.
+	 *
+	 * Any signal that says "changed" wins, and we only skip when at least one signal is present and
+	 * every present signal agrees the chunk is unchanged. No comparable signal at all means download:
+	 * a missed download silently loses another client's edits, while a redundant one only costs
+	 * bandwidth. This matters because backends vary wildly — GitHub reports no useful timestamp (its
+	 * listing hardcodes the epoch to avoid rate limits) and leans entirely on the commit sha, while S3
+	 * and Dropbox only resolve timestamps to the second.
+	 */
+	private isChunkStale(cached: ChunkMetadata | undefined, remote: RemoteChunkInfo): boolean {
+		if (!cached) return true;
+
+		const comparisons = [
+			[cached.etag, remote.etag] as const,
+			[cached.remoteSize, remote.size] as const,
+			[cached.remoteModifiedAt, remote.modifiedAt?.getTime()] as const
+		].filter(([ours, theirs]) => ours !== undefined && theirs !== undefined);
+
+		if (comparisons.length === 0) return true;
+		return comparisons.some(([ours, theirs]) => ours !== theirs);
 	}
 
 	/**
@@ -202,7 +256,11 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 	}
 
 	/**
-	 * Decodes 7z bytes into a file content map.
+	 * Decodes 7z bytes into a file content map, keyed by canonical path.
+	 *
+	 * Archive entry names are stored relative (7z drops a leading slash), so the slash is deliberately
+	 * stripped on the way out in `encodeZip` and restored here. `.metadata.json` is the chunk's own
+	 * sidecar rather than a synced file, so it keeps its bare name.
 	 */
 	private async decodeZip(zipBytes: Uint8Array): Promise<Map<string, Uint8Array>> {
 		const filesMap = new Map<string, Uint8Array>();
@@ -213,18 +271,15 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 		await reader.appendChunk(zipBytes);
 		for await (const entry of reader.extract()) {
 			const filename =
-				entry.path === '.metadata.json'
-					? '.metadata.json'
-					: entry.path.startsWith('/')
-						? entry.path
-						: '/' + entry.path;
+				entry.path === '.metadata.json' ? '.metadata.json' : normalisePath(entry.path);
 			filesMap.set(filename, entry.data);
 		}
 		return filesMap;
 	}
 
 	/**
-	 * Encodes a file content map into a 7z Uint8Array.
+	 * Encodes a file content map into a 7z Uint8Array. See `decodeZip` for why the leading slash is
+	 * dropped here and restored on read.
 	 */
 	private async encodeZip(filesMap: Map<string, Uint8Array>): Promise<Uint8Array> {
 		const writer = new SevenZipWriter(this.password);
@@ -244,7 +299,20 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 			return { uncompressedSize: 0, files: {}, deleted: [] };
 		}
 		try {
-			return JSON.parse(new TextDecoder().decode(metaBytes));
+			const parsed: ChunkMetadata = JSON.parse(new TextDecoder().decode(metaBytes));
+			// Archives written by older clients keyed entries without a leading slash — canonicalise on
+			// the way in so callers can look entries up by one form only.
+			return {
+				...parsed,
+				files: Object.entries(parsed.files ?? {}).reduce<ChunkMetadata['files']>(
+					(acc, [path, entry]) => {
+						acc[normalisePath(path)] = entry;
+						return acc;
+					},
+					{}
+				),
+				deleted: parsed.deleted?.map(normalisePath) ?? []
+			};
 		} catch {
 			return { uncompressedSize: 0, files: {}, deleted: [] };
 		}
@@ -258,7 +326,7 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 		chunkPath: string,
 		filesMap: Map<string, Uint8Array>,
 		chunkMeta: ChunkMetadata
-	): Promise<void> {
+	): Promise<number> {
 		const metaContent = new TextEncoder().encode(JSON.stringify(chunkMeta, null, 2));
 		filesMap.set('.metadata.json', metaContent);
 
@@ -287,6 +355,7 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 		});
 
 		await op.finished;
+		return zipBytes.length;
 	}
 
 	/**
@@ -294,7 +363,7 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 	 */
 	private async downloadAndExtractChunk(
 		context: StratusSyncContext,
-		rc: { path: string; size?: number },
+		rc: RemoteChunkInfo,
 		metadata: any,
 		conflicts: SyncConflict[],
 		created: string[],
@@ -352,19 +421,22 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 		const filesMap = await this.decodeZip(bytes);
 		const chunkMeta = this.parseChunkMetadata(filesMap);
 
-		// Store metadata in local cache
-		metadata.chunks![rc.path] = chunkMeta;
+		// Store metadata in local cache alongside the freshness signals this listing gave us
+		metadata.chunks![rc.path] = {
+			...chunkMeta,
+			remoteModifiedAt: rc.modifiedAt?.getTime(),
+			remoteSize: rc.size ?? bytes.length,
+			etag: rc.etag
+		};
 
 		// Extract entries
 		const entries = Array.from(filesMap.entries()).filter(([name]) => name !== '.metadata.json');
 		await Promise.all(
 			entries.map(async ([entryPath, content]) => {
-				const path = normalize(entryPath).replace(/^\/+/, '');
+				const path = normalisePath(entryPath);
 				const localFiles = metadata.files;
 				const localFile = localFiles[path];
-				const remoteFileMeta =
-					chunkMeta.files[path] || chunkMeta.files[entryPath] || chunkMeta.files['/' + path];
-				const remoteModifiedAt = remoteFileMeta?.modifiedAt ?? Date.now();
+				const remoteModifiedAt = chunkMeta.files[path]?.modifiedAt ?? Date.now();
 
 				const isLocalModified =
 					localFile && (localFile.status === 'dirty' || localFile.status === 'deleted');
@@ -435,34 +507,37 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 	private async initialiseActiveChunk(
 		context: StratusSyncContext,
 		activeChunkPath: string,
-		remoteChunks: { path: string }[],
+		remoteChunks: RemoteChunkInfo[],
 		chunksCache: Record<string, ChunkMetadata>
 	): Promise<ChunkMetadata> {
-		let activeChunk = chunksCache[activeChunkPath];
-		if (activeChunk) {
-			return activeChunk;
+		const cached = chunksCache[activeChunkPath];
+		if (cached) {
+			return cached;
 		}
 
 		// Try downloading metadata of the active chunk if it exists but wasn't in cache
-		const activeExists = remoteChunks.some((c) => c.path === activeChunkPath);
-		if (activeExists) {
+		const remoteActive = remoteChunks.find((c) => c.path === activeChunkPath);
+		if (remoteActive) {
 			const op = context.backend.readFile(activeChunkPath);
 			const activeBytes = await op.finished;
-			const filesMap = await this.decodeZip(activeBytes);
-			activeChunk = this.parseChunkMetadata(filesMap);
-			chunksCache[activeChunkPath] = activeChunk;
-		}
-
-		if (!activeChunk) {
-			activeChunk = {
-				uncompressedSize: 0,
-				files: {},
-				deleted: []
+			const activeChunk = {
+				...this.parseChunkMetadata(await this.decodeZip(activeBytes)),
+				remoteModifiedAt: remoteActive.modifiedAt?.getTime(),
+				remoteSize: remoteActive.size ?? activeBytes.length,
+				etag: remoteActive.etag
 			};
 			chunksCache[activeChunkPath] = activeChunk;
+			return activeChunk;
 		}
 
-		return activeChunk;
+		// A brand new chunk is deliberately NOT written to the cache: it does not exist remotely yet, so
+		// it has no freshness signals, and caching it would make `isChunkStale` compare against nothing.
+		// The push path adds the cache entry once the chunk has actually been uploaded.
+		return {
+			uncompressedSize: 0,
+			files: {},
+			deleted: []
+		};
 	}
 
 	/**
@@ -475,7 +550,7 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 		initialChunkNum: number,
 		initialChunkPath: string,
 		initialChunk: ChunkMetadata,
-		remoteChunks: { path: string }[],
+		remoteChunks: RemoteChunkInfo[],
 		dirtyPaths: string[],
 		deletedPaths: string[],
 		created: string[],
@@ -501,6 +576,8 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 			filesMap = await this.decodeZip(bytes);
 		}
 
+		// Deletions accumulate as tombstones so clients that already hold the file in an older chunk
+		// learn it is gone.
 		const cumulativeDeleted = new Set(currentChunk.deleted);
 		deletedPaths.forEach((path) => cumulativeDeleted.add(path));
 
@@ -508,8 +585,14 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 
 		await dirtyPaths.reduce(async (promise, path) => {
 			await promise;
-			const content = await context.readLocalFile(path);
 			const fileMeta = localFiles[path];
+			if (!fileMeta) {
+				// The metadata entry vanished between listing and writing; skipping keeps the rest of the
+				// sync alive rather than aborting everything mid-upload.
+				console.warn(`[MiddlewareZipChunk] skipping dirty path with no metadata entry: ${path}`);
+				return;
+			}
+			const content = await context.readLocalFile(path);
 
 			// If adding this file meets or exceeds the threshold and we already have files in the current chunk, rollover
 			const currentSize = currentChunk.uncompressedSize;
@@ -519,13 +602,14 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 			) {
 				// 1. Write the current chunk to backend
 				currentChunk.deleted = Array.from(cumulativeDeleted);
-				currentChunk.uncompressedSize = Array.from(filesMap.entries())
-					.filter(([name]) => name !== '.metadata.json')
-					.reduce((acc, [, bytes]) => acc + bytes.length, 0);
-				const tempPath = `/temp_sync_archive_chunk_${String(currentChunkNum).padStart(3, '0')}.7z`;
-				await this.writeChunk(context, tempPath, filesMap, currentChunk);
-				await context.backend.renameFile(tempPath, currentChunkPath);
-				metadata.chunks[currentChunkPath] = { ...currentChunk };
+				await this.flushChunk(
+					context,
+					metadata,
+					currentChunkNum,
+					currentChunkPath,
+					currentChunk,
+					filesMap
+				);
 
 				// 2. Rollover to new chunk
 				currentChunkNum++;
@@ -541,34 +625,28 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 			}
 
 			// Add/overwrite file in the current chunk
-			const normalizedPath = normalize(path).replace(/^\/+/, '');
-			filesMap.set(normalizedPath, content);
+			filesMap.set(path, content);
 
-			const isNew = !currentChunk.files[normalizedPath];
-			if (isNew) {
-				created.push(normalizedPath);
+			if (currentChunk.files[path]) {
+				updated.push(path);
 			} else {
-				updated.push(normalizedPath);
+				created.push(path);
 			}
 
-			currentChunk.files[normalizedPath] = {
+			currentChunk.files[path] = {
 				size: content.length,
 				modifiedAt: fileMeta.localModifiedAt
 			};
 
-			localFiles[normalizedPath] = {
+			localFiles[path] = {
 				...fileMeta,
-				path: normalizedPath,
 				status: 'clean',
 				remoteModifiedAt: Date.now()
 			};
 
 			cumulativeDeleted.delete(path);
 			currentChunk.deleted = Array.from(cumulativeDeleted);
-
-			currentChunk.uncompressedSize = Array.from(filesMap.entries())
-				.filter(([name]) => name !== '.metadata.json')
-				.reduce((acc, [, bytes]) => acc + bytes.length, 0);
+			currentChunk.uncompressedSize = this.measureUncompressed(filesMap);
 
 			hasUnwrittenChanges = true;
 		}, Promise.resolve());
@@ -576,26 +654,56 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 		// Process deleted paths
 		deletedPaths.forEach((path) => {
 			filesMap.delete(path);
-			if (currentChunk.files[path]) {
-				delete currentChunk.files[path];
-			}
-			deleted.push(path);
+			delete currentChunk.files[path];
 			delete localFiles[path];
+			deleted.push(path);
 			hasUnwrittenChanges = true;
 		});
 
 		// Finalize and write the last active chunk
 		if (hasUnwrittenChanges || !activeExists) {
 			currentChunk.deleted = Array.from(cumulativeDeleted);
-			currentChunk.uncompressedSize = Array.from(filesMap.entries())
-				.filter(([name]) => name !== '.metadata.json')
-				.reduce((acc, [, bytes]) => acc + bytes.length, 0);
-
-			const tempPath = `/temp_sync_archive_chunk_${String(currentChunkNum).padStart(3, '0')}.7z`;
-			await this.writeChunk(context, tempPath, filesMap, currentChunk);
-			await context.backend.renameFile(tempPath, currentChunkPath);
-			metadata.chunks[currentChunkPath] = currentChunk;
+			await this.flushChunk(
+				context,
+				metadata,
+				currentChunkNum,
+				currentChunkPath,
+				currentChunk,
+				filesMap
+			);
 		}
+	}
+
+	/** Total uncompressed byte size of a chunk's payload, excluding its own metadata entry. */
+	private measureUncompressed(filesMap: Map<string, Uint8Array>): number {
+		return Array.from(filesMap.entries())
+			.filter(([name]) => name !== '.metadata.json')
+			.reduce((acc, [, bytes]) => acc + bytes.length, 0);
+	}
+
+	/**
+	 * Uploads a chunk under a temp name, swaps it into place, and records the freshness baseline the
+	 * next sync compares against. Writing to a temp path first means a failed upload cannot leave a
+	 * half-written archive under the real chunk name.
+	 */
+	private async flushChunk(
+		context: StratusSyncContext,
+		metadata: any,
+		chunkNum: number,
+		chunkPath: string,
+		chunk: ChunkMetadata,
+		filesMap: Map<string, Uint8Array>
+	): Promise<void> {
+		chunk.uncompressedSize = this.measureUncompressed(filesMap);
+
+		const tempPath = `/temp_sync_archive_chunk_${String(chunkNum).padStart(3, '0')}.7z`;
+		const zipLength = await this.writeChunk(context, tempPath, filesMap, chunk);
+		await context.backend.renameFile(tempPath, chunkPath);
+
+		metadata.chunks[chunkPath] = {
+			...chunk,
+			...this.chunkRemoteInfo(await context.backend.stat(chunkPath), zipLength)
+		};
 	}
 
 	async sync(context: StratusSyncContext): Promise<SyncResult> {
@@ -622,13 +730,12 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 		// ==========================================
 		// Phase 1: Pull & Extract (Remote updates)
 		// ==========================================
-		const chunksToDownload = remoteChunks.filter((rc) => {
-			const cached = metadata.chunks![rc.path];
-			return !cached || cached.uncompressedSize === 0;
-		});
+		const chunksToDownload = remoteChunks.filter((rc) =>
+			this.isChunkStale(metadata.chunks![rc.path], rc)
+		);
 
 		const totalChunks = chunksToDownload.length;
-		const totalBytes = chunksToDownload.reduce((acc, c) => acc + c.size, 0);
+		const totalBytes = chunksToDownload.reduce((acc, c) => acc + (c.size ?? 0), 0);
 		let completedBytes = 0;
 		let completedChunks = 0;
 
@@ -753,13 +860,15 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 			metadata.chunks = {};
 		}
 
-		// Find active files (exclude 'deleted' status and '_updates' files)
+		// Find active files. Conflict sidecars (`shared_updates.txt` next to `shared.txt`) are packed
+		// like any other file: an unresolved conflict keeps both versions so the person, not the
+		// middleware, decides which one wins. `resolveConflict()` removes the sidecar once they choose.
 		const activePaths = Object.keys(localFiles).filter(
-			(path) => localFiles[path].status !== 'deleted' && !path.endsWith('_updates')
+			(path) => localFiles[path].status !== 'deleted'
 		);
 
 		// 3. Pack active files into a new set of temp chunks
-		const tempChunks: { path: string; meta: ChunkMetadata }[] = [];
+		const tempChunks: { path: string; meta: ChunkMetadata; zipLength: number }[] = [];
 
 		let currentTempChunkNum = 1;
 		let currentTempChunkPath = `/temp_archive_chunk_${String(currentTempChunkNum).padStart(3, '0')}.7z`;
@@ -783,15 +892,19 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 				currentFilesMap.size > 0
 			) {
 				// Serialize metadata and write the current temp chunk
-				currentChunkMeta.uncompressedSize = Array.from(currentFilesMap.entries())
-					.filter(([name]) => name !== '.metadata.json')
-					.reduce((acc, [, bytes]) => acc + bytes.length, 0);
+				currentChunkMeta.uncompressedSize = this.measureUncompressed(currentFilesMap);
 
-				await this.writeChunk(context, currentTempChunkPath, currentFilesMap, currentChunkMeta);
+				const zipLength = await this.writeChunk(
+					context,
+					currentTempChunkPath,
+					currentFilesMap,
+					currentChunkMeta
+				);
 
 				tempChunks.push({
 					path: currentTempChunkPath,
-					meta: { ...currentChunkMeta }
+					meta: { ...currentChunkMeta },
+					zipLength
 				});
 
 				// Start next temp chunk
@@ -816,15 +929,19 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 
 		// Add the final temp chunk
 		if (currentFilesMap.size > 0 || tempChunks.length === 0) {
-			currentChunkMeta.uncompressedSize = Array.from(currentFilesMap.entries())
-				.filter(([name]) => name !== '.metadata.json')
-				.reduce((acc, [, bytes]) => acc + bytes.length, 0);
+			currentChunkMeta.uncompressedSize = this.measureUncompressed(currentFilesMap);
 
-			await this.writeChunk(context, currentTempChunkPath, currentFilesMap, currentChunkMeta);
+			const zipLength = await this.writeChunk(
+				context,
+				currentTempChunkPath,
+				currentFilesMap,
+				currentChunkMeta
+			);
 
 			tempChunks.push({
 				path: currentTempChunkPath,
-				meta: { ...currentChunkMeta }
+				meta: { ...currentChunkMeta },
+				zipLength
 			});
 		}
 
@@ -845,7 +962,8 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 
 			// Populate cache for local metadata
 			newChunksCache[finalChunkPath] = {
-				...chunk.meta
+				...chunk.meta,
+				...this.chunkRemoteInfo(await context.backend.stat(finalChunkPath), chunk.zipLength)
 			};
 		}, Promise.resolve());
 
