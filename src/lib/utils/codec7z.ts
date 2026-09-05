@@ -78,17 +78,20 @@ export class SevenZipWriter {
 	}
 
 	/**
-	 * Finalizes compression, executes 7-Zip in MEMFS, and returns the final archive bytes.
+	 * Runs a single `7z a` (add/update) invocation against a fresh WASM instance, optionally
+	 * seeding it with a previously-produced archive so the new entries are appended to it, and
+	 * returns the resulting archive bytes.
 	 */
-	async finalize(): Promise<Uint8Array> {
+	private async runAdd(entries: SevenZipEntry[], existingArchive?: Uint8Array): Promise<Uint8Array> {
 		const js7z = await createJS7z();
 
-		// Prepare workspace directories in virtual MEMFS
 		js7z.FS.mkdir('/in');
 		js7z.FS.mkdir('/out');
+		if (existingArchive) {
+			js7z.FS.writeFile('/out/archive.7z', existingArchive);
+		}
 
-		// Write all accumulated entries to the virtual FS
-		for (const entry of this.entries) {
+		for (const entry of entries) {
 			const parts = entry.path.split('/');
 			if (parts.length > 1) {
 				const parentDir = parts.slice(0, -1).join('/');
@@ -109,8 +112,7 @@ export class SevenZipWriter {
 					return;
 				}
 				try {
-					const archiveBytes = js7z.FS.readFile('/out/archive.7z');
-					resolve(archiveBytes);
+					resolve(js7z.FS.readFile('/out/archive.7z'));
 				} catch (err) {
 					reject(err);
 				}
@@ -122,6 +124,35 @@ export class SevenZipWriter {
 
 			js7z.callMain(args);
 		});
+	}
+
+	/**
+	 * Finalizes compression and returns the final archive bytes.
+	 *
+	 * 7-Zip's `callMain` runs fully synchronously, so a single call for a large entry set would
+	 * block the main thread for the whole compression with no chance to repaint a progress
+	 * update in between. Instead, entries are added in small batches — each batch re-opens the
+	 * archive produced by the previous one and appends to it — with an `await` between batches
+	 * so the caller (and the browser) gets a turn before the next batch's blocking call starts.
+	 * `onProgress` reports the fraction of entries compressed so far (0-100).
+	 */
+	async finalize(onProgress?: (percent: number) => void): Promise<Uint8Array> {
+		const BATCH_SIZE = 25;
+		let archiveBytes: Uint8Array | undefined;
+
+		for (let start = 0; start < this.entries.length; start += BATCH_SIZE) {
+			const batch = this.entries.slice(start, start + BATCH_SIZE);
+			archiveBytes = await this.runAdd(batch, archiveBytes);
+
+			const compressed = Math.min(start + batch.length, this.entries.length);
+			onProgress?.(Math.round((compressed / this.entries.length) * 100));
+
+			// Yield to the event loop so the browser can paint the progress update before the
+			// next batch's synchronous compression call blocks the main thread again.
+			await new Promise((resolveTick) => setTimeout(resolveTick, 0));
+		}
+
+		return archiveBytes ?? this.runAdd([]);
 	}
 }
 

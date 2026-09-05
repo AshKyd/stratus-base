@@ -17,6 +17,10 @@ The library consists of three main components:
    - `MiddlewareIndividualFile`: Synchronises files individually. Supports `sparse` mode (on-demand download of file contents).
    - `MiddlewareZipChunk`: Compresses files into password-protected sequential ZIP archives, hiding file names and folder structures from the remote host. Practical, portable e2e encryption.
 
+The `SevenZipWriter`/`SevenZipReader` codec that powers `MiddlewareZipChunk` is also exported
+directly for building or reading standalone `.7z` archives outside the sync flow — see
+[Direct 7z Archive Access](#7-direct-7z-archive-access-sevenzipwriter--sevenzipreader) below.
+
 ---
 
 ## Quick Start
@@ -112,6 +116,38 @@ Call `reset()` to recursively delete the local cache folder in OPFS and clear cr
 await client.reset();
 ```
 
+### 7. Direct 7z Archive Access (`SevenZipWriter` / `SevenZipReader`)
+
+`SevenZipWriter` and `SevenZipReader` provide direct access to the underlying 7z WebAssembly codec.
+
+```typescript
+import { SevenZipWriter, SevenZipReader } from 'stratus-base';
+
+// Create an archive
+const writer = new SevenZipWriter('optional-password');
+await writer.write({ path: 'todo.md', data: new TextEncoder().encode('- [ ] Task') });
+await writer.write({ path: 'images/logo.png', data: pngBytes });
+
+const archiveBytes = await writer.finalize((percent) => {
+	console.log(`Compressing: ${percent}%`);
+});
+
+// Extract an archive
+const reader = new SevenZipReader('optional-password');
+await reader.appendChunk(archiveBytes);
+
+for await (const entry of reader.extract()) {
+	console.log(entry.path, entry.data);
+}
+```
+
+#### API Details
+
+- **Streams**: Both classes provide a `writable` (`WritableStream`). `SevenZipWriter.writable` accepts `{ path: string, data: Uint8Array }` objects, while `SevenZipReader.writable` accepts `Uint8Array` archive byte chunks.
+- **Encryption**: Passing a password enables AES-256 encryption and header encryption (`-mhe=on`), obscuring archive metadata and file names.
+- **Progress Tracking**: `SevenZipWriter.finalize(onProgress?: (percent: number) => void)` yields progress (`0`–`100`) between batch compression cycles.
+- **Extraction**: `SevenZipReader.extract()` is an async generator that yields `{ path: string, data: Uint8Array }` entries.
+
 ---
 
 ## Development Setup
@@ -125,16 +161,16 @@ enough; run it manually (add `--force` to refetch) if you need to.
 The script uses **only Node builtins** — `fetch`, `node:zlib` and `node:crypto` — with no
 `curl`, `unzip` or third-party packages, because it runs during `npm install` on machines we
 don't control (CI, Docker images, and consumers installing straight from git). The download is
-pinned by version *and* SHA-256; a mismatch fails loudly rather than vendoring an unexpected
+pinned by version _and_ SHA-256; a mismatch fails loudly rather than vendoring an unexpected
 build.
 
 It writes three plain `.js` files and no binary:
 
-| File | Purpose |
-| --- | --- |
-| `js7z.cjs` | Upstream UMD glue, loaded by Node (real CommonJS, so Node's interop works) |
-| `js7z.mjs` | Same glue with an `export default` appended, loaded by browsers/bundlers |
-| `js7z-wasm.js` | The WASM binary, base64-encoded into an ESM module |
+| File           | Purpose                                                                    |
+| -------------- | -------------------------------------------------------------------------- |
+| `js7z.cjs`     | Upstream UMD glue, loaded by Node (real CommonJS, so Node's interop works) |
+| `js7z.mjs`     | Same glue with an `export default` appended, loaded by browsers/bundlers   |
+| `js7z-wasm.js` | The WASM binary, base64-encoded into an ESM module                         |
 
 The wasm is handed to Emscripten as `Module.wasmBinary` rather than shipped as a `.wasm` asset.
 That means the published `dist/` contains no bundler-specific syntax (no `?url`), no
@@ -215,5 +251,3 @@ For detailed configurations, see the following documentation:
 - [Dropbox Integration](docs/dropbox.md)
 - [GitHub Integration](docs/github.md)
 - [Amazon S3 Integration](docs/s3.md)
-- [Core Design Plan](plans/index.md)
-- [API Reference](plans/API.md)

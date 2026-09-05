@@ -83,3 +83,44 @@ test('codec7z roundtrip with password encryption and header encryption ("test")'
 	assert.strictEqual(extractedEntries.get('secret1.txt'), 'Confidential information 1');
 	assert.strictEqual(extractedEntries.get('nested/secret2.txt'), 'Confidential information 2');
 });
+
+test('codec7z finalize reports compression progress in batches and preserves every entry', async () => {
+	const writer = new SevenZipWriter();
+
+	// More than one internal batch worth of entries, so this exercises the incremental
+	// add-to-existing-archive path, not just a single one-shot compression.
+	const fileCount = 30;
+	for (let i = 0; i < fileCount; i++) {
+		await writer.write({
+			path: `note-${i}.txt`,
+			data: new TextEncoder().encode(`Contents of note ${i}`)
+		});
+	}
+
+	const percentages: number[] = [];
+	const archiveBytes = await writer.finalize((percent) => percentages.push(percent));
+	assert.ok(archiveBytes.length > 0);
+
+	// At least two updates (one per batch) confirms progress is reported incrementally rather
+	// than only once at the very end.
+	assert.ok(percentages.length >= 2, 'expected more than one progress update across batches');
+	assert.ok(
+		percentages.every((percent) => percent >= 0 && percent <= 100),
+		'expected all progress updates to be valid percentages'
+	);
+	for (let i = 1; i < percentages.length; i++) {
+		assert.ok(percentages[i] >= percentages[i - 1], 'expected progress to never go backwards');
+	}
+	assert.strictEqual(percentages.at(-1), 100);
+
+	// Every batch's entries must survive being appended into the previous batch's archive.
+	const reader = new SevenZipReader();
+	await reader.appendChunk(archiveBytes);
+	const extracted = new Map<string, string>();
+	for await (const entry of reader.extract()) {
+		extracted.set(entry.path, new TextDecoder().decode(entry.data));
+	}
+	for (let i = 0; i < fileCount; i++) {
+		assert.strictEqual(extracted.get(`note-${i}.txt`), `Contents of note ${i}`);
+	}
+});
