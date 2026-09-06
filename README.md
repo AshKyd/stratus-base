@@ -141,12 +141,33 @@ for await (const entry of reader.extract()) {
 }
 ```
 
+#### Custom Formats and Options
+
+Both constructors accept an optional `options` (`SevenZipOptions`) object to configure the archive format and compression flags:
+
+```typescript
+// Create a .zip archive instead of the default .7z
+const writer = new SevenZipWriter(undefined, {
+	filename: 'archive.zip', // Format is inferred from extension (.zip, .7z, .tar, etc.)
+	extraArgs: ['-mx=1']     // Optional 7-Zip CLI arguments (e.g. compression level)
+});
+const archiveBytes = await writer.finalize();
+
+// Read a .zip archive
+const reader = new SevenZipReader(undefined, { filename: 'archive.zip' });
+await reader.appendChunk(archiveBytes);
+```
+
 #### API Details
 
-- **Streams**: Both classes provide a `writable` (`WritableStream`). `SevenZipWriter.writable` accepts `{ path: string, data: Uint8Array }` objects, while `SevenZipReader.writable` accepts `Uint8Array` archive byte chunks.
-- **Encryption**: Passing a password enables AES-256 encryption and header encryption (`-mhe=on`), obscuring archive metadata and file names.
+- **`options.filename`** (`string`, default: `'archive.7z'`): Sets the archive format inferred from the file extension (e.g., `.zip`, `.7z`, `.tar`).
+- **`options.extraArgs`** (`string[]`): Custom CLI flags passed directly to 7-Zip (e.g., `['-mx=9']` for maximum compression).
+- **Encryption**: Passing a `password` enables AES-256 encryption. For `.7z` archives, header encryption (`-mhe=on`) is enabled automatically to obscure filenames and archive metadata.
+- **Streams**: Both classes provide a `writable` (`WritableStream`).
+  - `SevenZipWriter.writable`: Accepts `{ path: string, data: Uint8Array }` objects.
+  - `SevenZipReader.writable`: Accepts `Uint8Array` archive byte chunks (e.g., piped from `fetch` or a file stream).
 - **Progress Tracking**: `SevenZipWriter.finalize(onProgress?: (percent: number) => void)` yields progress (`0`–`100`) between batch compression cycles.
-- **Extraction**: `SevenZipReader.extract()` is an async generator that yields `{ path: string, data: Uint8Array }` entries.
+- **Extraction**: `SevenZipReader.extract()` is an async generator yielding `{ path: string, data: Uint8Array }` entries.
 
 ---
 

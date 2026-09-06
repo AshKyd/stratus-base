@@ -5,6 +5,17 @@ export interface SevenZipEntry {
 	data: Uint8Array;
 }
 
+export interface SevenZipOptions {
+	/**
+	 * In-archive filename 7-Zip uses to infer the archive format, e.g. 'archive.zip' for a real
+	 * ZIP instead of 7z — the vendored build is 7-Zip's full "Alone2" variant, which picks the
+	 * format purely from this extension. Default: 'archive.7z'.
+	 */
+	filename?: string;
+	/** Raw extra CLI arguments appended after the wrapper's own path/password/format args. */
+	extraArgs?: string[];
+}
+
 const isNode = typeof process !== 'undefined' && !!process.versions?.node;
 
 // Two copies of the same vendored build are kept: `js7z.cjs` (real CommonJS, so Node's
@@ -54,6 +65,8 @@ async function createJS7z(): Promise<JS7zInstance> {
 
 export class SevenZipWriter {
 	private password?: string;
+	private filename: string;
+	private extraArgs: string[];
 	private entries: SevenZipEntry[] = [];
 
 	/**
@@ -61,8 +74,10 @@ export class SevenZipWriter {
 	 */
 	public readonly writable: WritableStream<SevenZipEntry>;
 
-	constructor(password?: string) {
+	constructor(password?: string, options?: SevenZipOptions) {
 		this.password = password;
+		this.filename = options?.filename ?? 'archive.7z';
+		this.extraArgs = options?.extraArgs ?? [];
 		this.writable = new WritableStream({
 			write: async (entry) => {
 				await this.write(entry);
@@ -84,11 +99,12 @@ export class SevenZipWriter {
 	 */
 	private async runAdd(entries: SevenZipEntry[], existingArchive?: Uint8Array): Promise<Uint8Array> {
 		const js7z = await createJS7z();
+		const archivePath = `/out/${this.filename}`;
 
 		js7z.FS.mkdir('/in');
 		js7z.FS.mkdir('/out');
 		if (existingArchive) {
-			js7z.FS.writeFile('/out/archive.7z', existingArchive);
+			js7z.FS.writeFile(archivePath, existingArchive);
 		}
 
 		for (const entry of entries) {
@@ -100,10 +116,16 @@ export class SevenZipWriter {
 			js7z.FS.writeFile(`/in/${entry.path}`, entry.data);
 		}
 
-		const args = ['a', '/out/archive.7z', '/in/*'];
+		const args = ['a', archivePath, '/in/*'];
 		if (this.password) {
-			args.push(`-p${this.password}`, '-mhe=on');
+			args.push(`-p${this.password}`);
+			// Header encryption is a 7z-specific switch; forcing it onto e.g. a .zip target
+			// would either be rejected or silently misapplied, so it only applies to .7z.
+			if (this.filename.toLowerCase().endsWith('.7z')) {
+				args.push('-mhe=on');
+			}
 		}
+		args.push(...this.extraArgs);
 
 		return new Promise((resolve, reject) => {
 			js7z.onExit = function (exitCode: number) {
@@ -112,7 +134,7 @@ export class SevenZipWriter {
 					return;
 				}
 				try {
-					resolve(js7z.FS.readFile('/out/archive.7z'));
+					resolve(js7z.FS.readFile(archivePath));
 				} catch (err) {
 					reject(err);
 				}
@@ -179,6 +201,8 @@ export class SevenZipWriter {
  */
 export class SevenZipReader {
 	private password?: string;
+	private filename: string;
+	private extraArgs: string[];
 	private chunks: Uint8Array[] = [];
 
 	/**
@@ -186,8 +210,10 @@ export class SevenZipReader {
 	 */
 	public readonly writable: WritableStream<Uint8Array>;
 
-	constructor(password?: string) {
+	constructor(password?: string, options?: SevenZipOptions) {
 		this.password = password;
+		this.filename = options?.filename ?? 'archive.7z';
+		this.extraArgs = options?.extraArgs ?? [];
 		this.writable = new WritableStream({
 			write: async (chunk) => {
 				await this.appendChunk(chunk);
@@ -219,16 +245,18 @@ export class SevenZipReader {
 		}
 
 		const js7z = await createJS7z();
+		const archivePath = `/in/${this.filename}`;
 
 		// Prepare directories
 		js7z.FS.mkdir('/in');
 		js7z.FS.mkdir('/out');
-		js7z.FS.writeFile('/in/archive.7z', archiveBytes);
+		js7z.FS.writeFile(archivePath, archiveBytes);
 
-		const args = ['x', '/in/archive.7z', '-o/out'];
+		const args = ['x', archivePath, '-o/out'];
 		if (this.password) {
 			args.push(`-p${this.password}`);
 		}
+		args.push(...this.extraArgs);
 
 		const exitCode: number = await new Promise<number>((resolve, reject) => {
 			js7z.onExit = function (code: number) {

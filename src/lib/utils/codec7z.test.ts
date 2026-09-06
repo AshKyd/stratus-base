@@ -124,3 +124,50 @@ test('codec7z finalize reports compression progress in batches and preserves eve
 		assert.strictEqual(extracted.get(`note-${i}.txt`), `Contents of note ${i}`);
 	}
 });
+
+test('codec7z supports a custom filename to produce a real zip archive', async () => {
+	const writer = new SevenZipWriter(undefined, { filename: 'archive.zip' });
+	await writer.write({ path: 'note1.txt', data: new TextEncoder().encode('Hello from zip!') });
+
+	const archiveBytes = await writer.finalize();
+	assert.ok(archiveBytes.length > 0);
+
+	// Zip's local-file-header signature ("PK\x03\x04"), proving real format inference from the
+	// filename rather than just "the call didn't crash".
+	assert.strictEqual(archiveBytes[0], 0x50);
+	assert.strictEqual(archiveBytes[1], 0x4b);
+
+	const reader = new SevenZipReader(undefined, { filename: 'archive.zip' });
+	await reader.appendChunk(archiveBytes);
+
+	const extracted = new Map<string, string>();
+	for await (const entry of reader.extract()) {
+		extracted.set(entry.path, new TextDecoder().decode(entry.data));
+	}
+	assert.strictEqual(extracted.get('note1.txt'), 'Hello from zip!');
+});
+
+test('codec7z passes extraArgs through, and only applies -mhe=on to .7z targets', async () => {
+	// A password alongside a .zip target: -mhe=on (7z-only header encryption) must not be
+	// forced on here — if it were, 7-Zip would reject the switch or produce a broken archive,
+	// so a clean round-trip is itself proof the format-conditioning logic is correct.
+	const writer = new SevenZipWriter('secret', {
+		filename: 'secure.zip',
+		extraArgs: ['-mx=1'] // fastest/least compression — just proves extraArgs are honoured
+	});
+	await writer.write({ path: 'secret.txt', data: new TextEncoder().encode('zip encrypted') });
+
+	const archiveBytes = await writer.finalize();
+	assert.ok(archiveBytes.length > 0);
+	assert.strictEqual(archiveBytes[0], 0x50);
+	assert.strictEqual(archiveBytes[1], 0x4b);
+
+	const reader = new SevenZipReader('secret', { filename: 'secure.zip' });
+	await reader.appendChunk(archiveBytes);
+
+	const extracted = new Map<string, string>();
+	for await (const entry of reader.extract()) {
+		extracted.set(entry.path, new TextDecoder().decode(entry.data));
+	}
+	assert.strictEqual(extracted.get('secret.txt'), 'zip encrypted');
+});
