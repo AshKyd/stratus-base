@@ -171,3 +171,46 @@ test('codec7z passes extraArgs through, and only applies -mhe=on to .7z targets'
 	}
 	assert.strictEqual(extracted.get('secret.txt'), 'zip encrypted');
 });
+
+test('codec7z adds an incompressible random padding file that the reader hides', async () => {
+	const content = { path: 'note.txt', data: new TextEncoder().encode('tiny') };
+
+	// Padding is on by default and uses random (incompressible) bytes, so the archive is far
+	// larger than the ~4-byte payload — masking the real content size.
+	const paddedWriter = new SevenZipWriter();
+	await paddedWriter.write(content);
+	const padded = await paddedWriter.finalize();
+	assert.ok(padded.length >= 25 * 1024, `expected padded archive >= 25KB, got ${padded.length}`);
+
+	// Disabling padding produces a much smaller archive for the same input.
+	const bareWriter = new SevenZipWriter(undefined, { padding: false });
+	await bareWriter.write(content);
+	const bare = await bareWriter.finalize();
+	assert.ok(bare.length < padded.length);
+
+	// The padding file must never surface to consumers on extract.
+	const reader = new SevenZipReader();
+	await reader.appendChunk(padded);
+	const paths: string[] = [];
+	for await (const entry of reader.extract()) {
+		paths.push(entry.path);
+	}
+	assert.deepStrictEqual(paths, ['note.txt']);
+});
+
+test('codec7z padding size stays within the configured range', async () => {
+	// A tight custom range makes the padding contribution to archive size easy to bound.
+	const minBytes = 30 * 1024;
+	const maxBytes = 40 * 1024;
+	const writer = new SevenZipWriter(undefined, {
+		padding: { minBytes, maxBytes },
+		extraArgs: ['-mx=0'] // store, no compression — padding bytes pass through 1:1
+	});
+	await writer.write({ path: 'note.txt', data: new Uint8Array(0) });
+	const archive = await writer.finalize();
+
+	// Stored archive size is padding + a small container overhead, so it must sit at/above the
+	// minimum and not wildly exceed the maximum.
+	assert.ok(archive.length >= minBytes, `archive ${archive.length} below min ${minBytes}`);
+	assert.ok(archive.length <= maxBytes + 4 * 1024, `archive ${archive.length} above max+overhead`);
+});

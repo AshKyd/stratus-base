@@ -1,8 +1,17 @@
 import type { JS7zInstance } from '../vendor/js7z/js7z.cjs.d.ts';
+import { generateSecureRandomBytes, secureRandomInt, MAX_RANDOM_BYTES_PER_CALL } from './crypto.ts';
 
 export interface SevenZipEntry {
 	path: string;
 	data: Uint8Array;
+}
+
+/** Inclusive byte range for the random padding file. */
+export interface PaddingOptions {
+	/** Smallest padding size, in bytes. Default: 25 KB (25 * 1024). */
+	minBytes?: number;
+	/** Largest padding size, in bytes. Default: 64 KB (one getRandomValues call). */
+	maxBytes?: number;
 }
 
 export interface SevenZipOptions {
@@ -14,7 +23,25 @@ export interface SevenZipOptions {
 	filename?: string;
 	/** Raw extra CLI arguments appended after the wrapper's own path/password/format args. */
 	extraArgs?: string[];
+	/**
+	 * Adds one padding file of cryptographically random, incompressible bytes so the finished
+	 * archive's size doesn't leak the size of the real contents. `true` (the default) uses the
+	 * 25-64 KB range; a {@link PaddingOptions} object overrides the range; `false` disables it.
+	 * The reader filters this file out on extract, so it never surfaces to consumers.
+	 */
+	padding?: boolean | PaddingOptions;
 }
+
+// Smallest padding size; the default largest is MAX_RANDOM_BYTES_PER_CALL, so one
+// getRandomValues call always fills the whole padding buffer.
+const DEFAULT_PADDING_MIN_BYTES = 25 * 1024;
+
+/**
+ * In-archive path prefix for the size-masking padding file. Chosen to be recognisable so the
+ * reader can drop it, and unlikely to collide with a real entry. A random hex suffix is appended
+ * per archive.
+ */
+const PADDING_PATH_PREFIX = '.stratus-padding-';
 
 const isNode = typeof process !== 'undefined' && !!process.versions?.node;
 
@@ -68,6 +95,8 @@ export class SevenZipWriter {
 	private filename: string;
 	private extraArgs: string[];
 	private entries: SevenZipEntry[] = [];
+	/** Resolved padding byte range, or `undefined` when padding is disabled. */
+	private padding?: { minBytes: number; maxBytes: number };
 
 	/**
 	 * WritableStream interface to pipe SevenZipEntry objects directly.
@@ -78,6 +107,18 @@ export class SevenZipWriter {
 		this.password = password;
 		this.filename = options?.filename ?? 'archive.7z';
 		this.extraArgs = options?.extraArgs ?? [];
+
+		// Padding is on by default; only an explicit `false` disables it. An options object
+		// overrides either end of the range.
+		const { padding = true } = options ?? {};
+		if (padding !== false) {
+			const range = typeof padding === 'object' ? padding : {};
+			this.padding = {
+				minBytes: range.minBytes ?? DEFAULT_PADDING_MIN_BYTES,
+				maxBytes: range.maxBytes ?? MAX_RANDOM_BYTES_PER_CALL
+			};
+		}
+
 		this.writable = new WritableStream({
 			write: async (entry) => {
 				await this.write(entry);
@@ -162,12 +203,19 @@ export class SevenZipWriter {
 		const BATCH_SIZE = 25;
 		let archiveBytes: Uint8Array | undefined;
 
-		for (let start = 0; start < this.entries.length; start += BATCH_SIZE) {
-			const batch = this.entries.slice(start, start + BATCH_SIZE);
+		// The padding file is compressed alongside the real entries so it sits inside the same
+		// (encrypted) archive; being random bytes it doesn't compress, so its length carries
+		// through to the final size and masks how big the real contents are.
+		const entriesToCompress = this.padding
+			? [...this.entries, this.createPaddingEntry()]
+			: this.entries;
+
+		for (let start = 0; start < entriesToCompress.length; start += BATCH_SIZE) {
+			const batch = entriesToCompress.slice(start, start + BATCH_SIZE);
 			archiveBytes = await this.runAdd(batch, archiveBytes);
 
-			const compressed = Math.min(start + batch.length, this.entries.length);
-			onProgress?.(Math.round((compressed / this.entries.length) * 100));
+			const compressed = Math.min(start + batch.length, entriesToCompress.length);
+			onProgress?.(Math.round((compressed / entriesToCompress.length) * 100));
 
 			// Yield to the event loop so the browser can paint the progress update before the
 			// next batch's synchronous compression call blocks the main thread again.
@@ -175,6 +223,21 @@ export class SevenZipWriter {
 		}
 
 		return archiveBytes ?? this.runAdd([]);
+	}
+
+	/**
+	 * Builds one padding entry whose length is a cryptographically secure random value in the
+	 * configured range and whose contents are cryptographically secure random bytes. Random
+	 * content is essential: it's incompressible, so the padding survives compression at close to
+	 * its raw size. A random hex suffix keeps the path from colliding with a real entry.
+	 */
+	private createPaddingEntry(): SevenZipEntry {
+		const { minBytes, maxBytes } = this.padding!;
+		const byteLength = secureRandomInt(minBytes, maxBytes);
+		const suffix = Array.from(generateSecureRandomBytes(8), (byte) =>
+			byte.toString(16).padStart(2, '0')
+		).join('');
+		return { path: `${PADDING_PATH_PREFIX}${suffix}`, data: generateSecureRandomBytes(byteLength) };
 	}
 }
 
@@ -290,9 +353,15 @@ export class SevenZipReader {
 
 		const paths = Array.from(yieldFiles('/out'));
 		for (const fullPath of paths) {
-			const data = fs.readFile(fullPath);
 			// Reconstruct path relative to '/out/'
 			const relativePath = fullPath.substring('/out/'.length);
+			// The size-masking padding file the writer adds is an implementation detail — drop it
+			// so it never surfaces to consumers.
+			if (relativePath.startsWith(PADDING_PATH_PREFIX)) {
+				fs.unlink(fullPath);
+				continue;
+			}
+			const data = fs.readFile(fullPath);
 			yield {
 				path: relativePath,
 				data

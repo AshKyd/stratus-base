@@ -38,11 +38,11 @@ export type {
 	SmokeTestStepReporter
 } from './middleware/MiddlewareZipChunk/MiddlewareZipChunk.ts';
 export { SevenZipWriter, SevenZipReader, getJS7zWasmByteLength } from './utils/codec7z.ts';
-export type { SevenZipEntry, SevenZipOptions } from './utils/codec7z.ts';
+export type { SevenZipEntry, SevenZipOptions, PaddingOptions } from './utils/codec7z.ts';
 
 export { MemoryStorage } from './backends/MemoryStorage.ts';
 
-export { generateSecurePassword } from './utils/crypto.ts';
+export { generateSecurePassword, generateSecureRandomBytes, secureRandomInt } from './utils/crypto.ts';
 export {
 	STRATUS_CREDENTIALS_KEY,
 	loadCredentials,
