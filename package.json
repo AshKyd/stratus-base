@@ -13,7 +13,8 @@
 		"lint": "prettier --check . && eslint .",
 		"format": "prettier --write .",
 		"test": "npm run setup:js7z && node --experimental-strip-types --test \"src/lib/**/*.test.ts\"",
-		"test:browser": "npm run setup:js7z && vitest run --config vitest.config.ts"
+		"test:browser": "npm run setup:js7z && vitest run --config vitest.config.ts",
+		"dev:watch": "svelte-package --watch"
 	},
 	"files": [
 		"dist",
