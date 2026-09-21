@@ -341,21 +341,43 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 		});
 
 		const op = context.backend.writeFile(chunkPath, zipBytes, { atomic: this.atomic });
-		op.on('progress', ({ loaded, total }) => {
-			const totalBytes = total || zipBytes.length;
-			const percentage = totalBytes > 0 ? Math.min(100, Math.round((loaded / totalBytes) * 100)) : 0;
-			context.reportProgress({
-				phase: 'uploading',
-				totalBytes,
-				loadedBytes: loaded,
-				percentage,
-				currentFile: chunkPath,
-				message: `Uploading ${chunkPath}...`
-			});
-		});
+		op.on('progress', ({ loaded, total }) =>
+			this.reportTransfer(context, 'uploading', chunkPath, loaded, total || zipBytes.length)
+		);
 
 		await op.finished;
 		return zipBytes.length;
+	}
+
+	/** Reports a single chunk's upload or download progress. */
+	private reportTransfer(
+		context: StratusSyncContext,
+		phase: 'uploading' | 'downloading',
+		chunkPath: string,
+		loaded: number,
+		total: number
+	): void {
+		const verb = phase === 'uploading' ? 'Uploading' : 'Downloading';
+		context.reportProgress({
+			phase,
+			totalBytes: total,
+			loadedBytes: loaded,
+			percentage: total > 0 ? Math.min(100, Math.round((loaded / total) * 100)) : 0,
+			currentFile: chunkPath,
+			message: `${verb} ${chunkPath}...`
+		});
+	}
+
+	/**
+	 * Downloads the chunk that new changes are appended to. Runs before an upload, so without
+	 * progress the bar would sit still while the (up to chunk-size) file comes down.
+	 */
+	private readActiveChunk(context: StratusSyncContext, chunkPath: string): Promise<Uint8Array> {
+		const op = context.backend.readFile(chunkPath);
+		op.on('progress', ({ loaded, total }) =>
+			this.reportTransfer(context, 'downloading', chunkPath, loaded, total)
+		);
+		return op.finished;
 	}
 
 	/**
@@ -518,8 +540,7 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 		// Try downloading metadata of the active chunk if it exists but wasn't in cache
 		const remoteActive = remoteChunks.find((c) => c.path === activeChunkPath);
 		if (remoteActive) {
-			const op = context.backend.readFile(activeChunkPath);
-			const activeBytes = await op.finished;
+			const activeBytes = await this.readActiveChunk(context, activeChunkPath);
 			const activeChunk = {
 				...this.parseChunkMetadata(await this.decodeZip(activeBytes)),
 				remoteModifiedAt: remoteActive.modifiedAt?.getTime(),
@@ -571,8 +592,7 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 
 		let filesMap = new Map<string, Uint8Array>();
 		if (activeExists) {
-			const op = context.backend.readFile(currentChunkPath);
-			const bytes = await op.finished;
+			const bytes = await this.readActiveChunk(context, currentChunkPath);
 			filesMap = await this.decodeZip(bytes);
 		}
 

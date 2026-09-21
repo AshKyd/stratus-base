@@ -8,8 +8,32 @@ import type {
 } from '../types.ts';
 import { BaseStorageOperation } from '../utils/BaseStorageOperation.ts';
 import { clearCredentials } from '../utils/CredentialManager.ts';
+import { httpError, readBodyWithProgress, uploadWithProgress } from '../utils/httpTransfer.ts';
 
 const VERIFIER_KEY = 'dropbox_code_verifier';
+
+/** Dropbox's host for file content (download/upload), as opposed to the metadata API. */
+const CONTENT_API = 'https://content.dropboxapi.com/2';
+
+/**
+ * JSON for the `Dropbox-API-Arg` header. HTTP headers must be ASCII, so any other character is
+ * written as a `\uXXXX` escape, as Dropbox's own SDK does.
+ */
+function toHeaderSafeJson(value: unknown): string {
+	return JSON.stringify(value).replace(
+		/[-￿]/g,
+		(char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`
+	);
+}
+
+/** Parses a JSON response header, or returns an empty object when missing or malformed. */
+function parseJsonHeader(value: string | null): { size?: number } {
+	try {
+		return value ? JSON.parse(value) : {};
+	} catch {
+		return {};
+	}
+}
 
 /**
  * Checks if a Dropbox API error indicates that the file or folder was not found.
@@ -285,7 +309,20 @@ export class DropboxStorage extends EventTarget implements StorageBackend {
 	}
 
 	/**
-	 * Reads a file's content as a binary array.
+	 * Headers for a call to Dropbox's content endpoints (download/upload). These are called
+	 * directly rather than through the SDK because the SDK only resolves once the whole file has
+	 * transferred, so it can't report progress.
+	 */
+	private async contentHeaders(args: Record<string, unknown>): Promise<Record<string, string>> {
+		await this.auth.checkAndRefreshAccessToken();
+		return {
+			Authorization: `Bearer ${this.auth.getAccessToken()}`,
+			'Dropbox-API-Arg': toHeaderSafeJson(args)
+		};
+	}
+
+	/**
+	 * Reads a file's content as a binary array, reporting progress as it downloads.
 	 *
 	 * @param path The absolute file path to read.
 	 * @returns A cancellable StorageOperation yielding the binary content.
@@ -293,19 +330,17 @@ export class DropboxStorage extends EventTarget implements StorageBackend {
 	readFile(path: string): StorageOperation<Uint8Array> {
 		return new BaseStorageOperation(async (signal, onProgress) => {
 			try {
-				const response = await this.client.filesDownload({ path }, { signal });
-				const result = response.result;
-				if (result.fileBinary) {
-					const bytes = new Uint8Array(result.fileBinary);
-					onProgress(bytes.length, bytes.length);
-					return bytes;
+				const response = await fetch(`${CONTENT_API}/files/download`, {
+					method: 'POST',
+					headers: await this.contentHeaders({ path }),
+					signal
+				});
+				if (!response.ok) {
+					throw httpError(response.status, await response.text(), response.statusText);
 				}
-				if (result.fileBlob) {
-					const bytes = new Uint8Array(await result.fileBlob.arrayBuffer());
-					onProgress(bytes.length, bytes.length);
-					return bytes;
-				}
-				throw new Error('No content returned from filesDownload');
+				// Dropbox describes the file in a header, which gives a size when content-length is absent.
+				const { size = 0 } = parseJsonHeader(response.headers.get('Dropbox-API-Result'));
+				return await readBodyWithProgress(response, onProgress, size);
 			} catch (err) {
 				if (isAuthError(err)) {
 					this.dispatchEvent(
@@ -331,36 +366,34 @@ export class DropboxStorage extends EventTarget implements StorageBackend {
 	 */
 	writeFile(path: string, content: Uint8Array, options?: WriteOptions): StorageOperation<void> {
 		return new BaseStorageOperation(async (signal, onProgress) => {
+			const upload = async (targetPath: string) => {
+				console.log(`[DropboxStorage.writeFile] uploading to: ${targetPath}`);
+				await uploadWithProgress({
+					url: `${CONTENT_API}/files/upload`,
+					headers: {
+						...(await this.contentHeaders({
+							path: targetPath,
+							mode: { '.tag': 'overwrite' },
+							mute: true
+						})),
+						'Content-Type': 'application/octet-stream'
+					},
+					body: content,
+					signal,
+					onProgress
+				});
+				console.log(`[DropboxStorage.writeFile] upload complete: ${targetPath}`);
+			};
+
 			try {
 				if (options?.atomic) {
 					const tempPath = `${path}.tmp`;
-					console.log(`[DropboxStorage.writeFile] uploading to temp: ${tempPath}`);
-					await this.client.filesUpload(
-						{
-							path: tempPath,
-							contents: content,
-							mode: { '.tag': 'overwrite' },
-							mute: true
-						},
-						{ signal }
-					);
-					console.log(`[DropboxStorage.writeFile] upload complete: ${tempPath}`);
+					await upload(tempPath);
 					// renameFile handles deletion of destination for atomicity
 					await this.renameFile(tempPath, path);
 				} else {
-					console.log(`[DropboxStorage.writeFile] uploading directly to: ${path}`);
-					await this.client.filesUpload(
-						{
-							path,
-							contents: content,
-							mode: { '.tag': 'overwrite' },
-							mute: true
-						},
-						{ signal }
-					);
-					console.log(`[DropboxStorage.writeFile] upload complete: ${path}`);
+					await upload(path);
 				}
-				onProgress(content.length, content.length);
 			} catch (err) {
 				if (isAuthError(err)) {
 					this.dispatchEvent(

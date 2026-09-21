@@ -7,6 +7,7 @@ import type {
 } from '../types.ts';
 import { BaseStorageOperation } from '../utils/BaseStorageOperation.ts';
 import { clearCredentials } from '../utils/CredentialManager.ts';
+import { readBodyWithProgress, uploadWithProgress } from '../utils/httpTransfer.ts';
 
 /**
  * Authentication lifecycle events emitted by {@link GoogleDriveStorage}.
@@ -633,32 +634,33 @@ export class GoogleDriveStorage extends EventTarget implements StorageBackend {
 				throw new Error(`Failed to download file: ${response.statusText}`);
 			}
 
-			const total = Number(response.headers.get('content-length') || 0);
-			const reader = response.body?.getReader();
-			if (!reader) {
-				const buf = await response.arrayBuffer();
-				return new Uint8Array(buf);
-			}
+			return readBodyWithProgress(response, onProgress);
+		});
+	}
 
-			let loaded = 0;
-			const chunks: Uint8Array[] = [];
-			while (true) {
-				const { done, value } = await reader.read();
-				if (done) break;
-				if (value) {
-					chunks.push(value);
-					loaded += value.length;
-					onProgress(loaded, total || loaded);
-				}
-			}
-
-			const result = new Uint8Array(loaded);
-			let offset = 0;
-			for (const chunk of chunks) {
-				result.set(chunk, offset);
-				offset += chunk.length;
-			}
-			return result;
+	/**
+	 * Uploads file content with progress. Uses XHR rather than `fetchWithAuth`, because `fetch`
+	 * can't report upload progress; a 401 still flags the session as dead the same way.
+	 */
+	private uploadContent(
+		fileId: string,
+		content: Uint8Array,
+		signal: AbortSignal,
+		onProgress: (loaded: number, total: number) => void
+	) {
+		return uploadWithProgress({
+			url: `https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media`,
+			method: 'PATCH',
+			headers: {
+				Authorization: `Bearer ${this.accessToken}`,
+				'Content-Type': 'application/octet-stream'
+			},
+			body: content,
+			signal,
+			onProgress
+		}).catch((err) => {
+			if (err?.status === 401) this.emit('reauth-required', { reason: 'unauthorised' });
+			throw err;
 		});
 	}
 
@@ -672,22 +674,12 @@ export class GoogleDriveStorage extends EventTarget implements StorageBackend {
 	 * @returns A cancellable StorageOperation.
 	 */
 	writeFile(path: string, content: Uint8Array, options?: WriteOptions): StorageOperation<void> {
-		return new BaseStorageOperation(async (signal) => {
+		return new BaseStorageOperation(async (signal, onProgress) => {
 			const writeToDest = async (targetPath: string) => {
 				const fileId = await this.resolvePath(targetPath);
 				if (fileId) {
 					// Update existing file
-					const res = await this.fetchWithAuth(`https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media`, {
-						method: 'PATCH',
-						headers: {
-							'Content-Type': 'application/octet-stream'
-						},
-						body: content as any,
-						signal
-					});
-					if (!res.ok) {
-						throw new Error(`Failed to upload contents: ${res.statusText}`);
-					}
+					await this.uploadContent(fileId, content, signal, onProgress);
 				} else {
 					// Create folders up to parent directory
 					const pathParts = targetPath.split('/').filter(Boolean);
@@ -715,18 +707,7 @@ export class GoogleDriveStorage extends EventTarget implements StorageBackend {
 					const metadata = await metadataRes.json();
 
 					// Upload content
-					const res = await this.fetchWithAuth(`https://www.googleapis.com/upload/drive/v3/files/${metadata.id}?uploadType=media`, {
-						method: 'PATCH',
-						headers: {
-							'Content-Type': 'application/octet-stream'
-						},
-						body: content as any,
-						signal
-					});
-
-					if (!res.ok) {
-						throw new Error(`Failed to upload content for new file: ${res.statusText}`);
-					}
+					await this.uploadContent(metadata.id, content, signal, onProgress);
 
 					// Cache the path to new ID mapping
 					const cleanTargetPath = '/' + targetPath.split('/').filter(Boolean).join('/');

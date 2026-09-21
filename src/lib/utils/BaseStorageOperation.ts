@@ -1,9 +1,29 @@
 import type { StorageOperation, StorageOperationEvents } from '../types.ts';
 
+/** Minimum gap between progress events for one operation. */
+export const PROGRESS_INTERVAL_MS = 100;
+
 export class BaseStorageOperation<T> implements StorageOperation<T> {
 	readonly finished: Promise<T>;
 	private abortController = new AbortController();
 	private listeners: { [K in keyof StorageOperationEvents]?: StorageOperationEvents[K][] } = {};
+	/** Time of the last progress event passed on; 0 before the first. */
+	private lastProgressAt = 0;
+
+	/**
+	 * Streamed downloads and XHR uploads report progress many times per chunk. Each event becomes
+	 * a worker message and a UI update, so they are thinned to one per PROGRESS_INTERVAL_MS. The
+	 * first event and the completing one (`loaded >= total`) always go through, so the bar starts
+	 * moving straight away and always reaches the end.
+	 */
+	private reportProgress(loaded: number, total: number): void {
+		const now = Date.now();
+		const isFirst = this.lastProgressAt === 0;
+		const isComplete = total > 0 && loaded >= total;
+		if (!isFirst && !isComplete && now - this.lastProgressAt < PROGRESS_INTERVAL_MS) return;
+		this.lastProgressAt = now;
+		this.emit('progress', { loaded, total });
+	}
 
 	constructor(
 		executor: (
@@ -24,9 +44,9 @@ export class BaseStorageOperation<T> implements StorageOperation<T> {
 					if (this.abortController.signal.aborted) {
 						throw new DOMException('Operation aborted', 'AbortError');
 					}
-					return await executor(this.abortController.signal, (loaded, total) => {
-						this.emit('progress', { loaded, total });
-					});
+					return await executor(this.abortController.signal, (loaded, total) =>
+						this.reportProgress(loaded, total)
+					);
 				} catch (error: any) {
 					if (error.name === 'AbortError') {
 						throw error;

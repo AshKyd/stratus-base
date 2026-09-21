@@ -8,6 +8,7 @@ import {
 	CopyObjectCommand,
 	NoSuchKey
 } from '@aws-sdk/client-s3';
+import { XhrHttpHandler } from '@aws-sdk/xhr-http-handler';
 import type { StorageBackend, StorageFileInfo, StorageOperation, WriteOptions } from '../types.ts';
 import { BaseStorageOperation } from '../utils/BaseStorageOperation.ts';
 import { clearCredentials } from '../utils/CredentialManager.ts';
@@ -53,7 +54,15 @@ export interface S3StorageOptions {
 export class S3Storage extends EventTarget implements StorageBackend {
 	readonly id = 's3';
 	private options: S3StorageOptions;
-	private client: S3Client;
+	private client!: S3Client;
+	/**
+	 * Client used only for uploads. In browsers and workers it sends through XHR so upload progress
+	 * can be reported; the default fetch handler can't. Downloads stay on `client`, because XHR
+	 * response bodies don't stream and `readFile` reports progress from the stream.
+	 */
+	private uploadClient!: S3Client;
+	/** The XHR handler behind `uploadClient`, or null where XHR isn't available (Node). */
+	private uploadHandler: XhrHttpHandler | null = null;
 
 	/**
 	 * Initialises the S3 storage client with the provided options.
@@ -63,16 +72,51 @@ export class S3Storage extends EventTarget implements StorageBackend {
 	constructor(options: S3StorageOptions) {
 		super();
 		this.options = options;
-		this.client = new S3Client({
-			region: options.region,
-			endpoint: options.endpoint,
-			forcePathStyle: options.forcePathStyle ?? false,
+		this.buildClients();
+	}
+
+	/** (Re)creates both clients from the current options. */
+	private buildClients(): void {
+		const config = {
+			region: this.options.region,
+			endpoint: this.options.endpoint,
+			forcePathStyle: this.options.forcePathStyle ?? false,
 			credentials: {
-				accessKeyId: options.accessKeyId,
-				secretAccessKey: options.secretAccessKey,
-				sessionToken: options.sessionToken
+				accessKeyId: this.options.accessKeyId,
+				secretAccessKey: this.options.secretAccessKey,
+				sessionToken: this.options.sessionToken
 			}
-		});
+		};
+		this.client = new S3Client(config);
+
+		this.uploadHandler = typeof XMLHttpRequest === 'undefined' ? null : new XhrHttpHandler({});
+		this.uploadClient = this.uploadHandler
+			? new S3Client({ ...config, requestHandler: this.uploadHandler })
+			: this.client;
+	}
+
+	/**
+	 * Forwards upload progress for one key while `run` is in flight. The XHR handler's events are
+	 * client-wide, so each event is matched to this upload by its request path.
+	 */
+	private async trackUploadProgress<T>(
+		key: string,
+		onProgress: (loaded: number, total: number) => void,
+		run: () => Promise<T>
+	): Promise<T> {
+		const handler = this.uploadHandler;
+		if (!handler) return run();
+
+		const listener = (event: ProgressEvent, request: { path: string }) => {
+			if (!decodeURIComponent(request.path).endsWith(`/${key}`)) return;
+			onProgress(event.loaded, event.total);
+		};
+		handler.on(XhrHttpHandler.EVENTS.UPLOAD_PROGRESS, listener);
+		try {
+			return await run();
+		} finally {
+			handler.off(XhrHttpHandler.EVENTS.UPLOAD_PROGRESS, listener);
+		}
 	}
 
 	/**
@@ -91,15 +135,7 @@ export class S3Storage extends EventTarget implements StorageBackend {
 		this.options.accessKeyId = '';
 		this.options.secretAccessKey = '';
 		this.options.sessionToken = undefined;
-		this.client = new S3Client({
-			region: this.options.region,
-			endpoint: this.options.endpoint,
-			forcePathStyle: this.options.forcePathStyle ?? false,
-			credentials: {
-				accessKeyId: '',
-				secretAccessKey: ''
-			}
-		});
+		this.buildClients();
 		clearCredentials();
 	}
 
@@ -262,16 +298,19 @@ export class S3Storage extends EventTarget implements StorageBackend {
 	 */
 	writeFile(path: string, content: Uint8Array, options?: WriteOptions): StorageOperation<void> {
 		const key = this.normalizeKey(path);
-		return new BaseStorageOperation(async (signal) => {
+		return new BaseStorageOperation(async (signal, onProgress) => {
 			const upload = async (targetKey: string) => {
-				await this.client.send(
-					new PutObjectCommand({
-						Bucket: this.options.bucket,
-						Key: targetKey,
-						Body: content
-					}),
-					{ abortSignal: signal }
+				await this.trackUploadProgress(targetKey, onProgress, () =>
+					this.uploadClient.send(
+						new PutObjectCommand({
+							Bucket: this.options.bucket,
+							Key: targetKey,
+							Body: content
+						}),
+						{ abortSignal: signal }
+					)
 				);
+				onProgress(content.length, content.length);
 			};
 
 			if (options?.atomic) {

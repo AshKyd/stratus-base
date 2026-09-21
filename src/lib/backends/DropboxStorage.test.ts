@@ -81,19 +81,6 @@ let lastMovedTo = '';
 			}
 		};
 	}
-	if (path === 'files/download') {
-		return {
-			status: 200,
-			result: {
-				fileBinary: new Uint8Array([72, 101, 108, 108, 111])
-			}
-		};
-	}
-	if (path === 'files/upload') {
-		lastUploadedPath = args.path;
-		lastUploadedContents = args.contents;
-		return { status: 200, result: {} };
-	}
 	if (path === 'files/delete_v2') {
 		lastDeletedPath = args.path;
 		return { status: 200, result: {} };
@@ -124,6 +111,33 @@ let lastMovedTo = '';
 	}
 	throw new Error(`Unhandled mock request: ${path}`);
 };
+
+// Downloads and uploads bypass the SDK (so they can report progress) and go straight to the
+// content API with fetch. Node has no XMLHttpRequest, so uploads use the fetch fallback too.
+DropboxAuth.prototype.checkAndRefreshAccessToken = async () => {};
+
+/** Body chunks the next download streams back. */
+let downloadChunks: number[][] = [[72, 101, 108, 108, 111]];
+
+globalThis.fetch = (async (url: string, init: RequestInit) => {
+	const args = JSON.parse((init.headers as Record<string, string>)['Dropbox-API-Arg']);
+	if (url.endsWith('/files/download')) {
+		const body = new ReadableStream<Uint8Array>({
+			start(controller) {
+				downloadChunks.forEach((chunk) => controller.enqueue(new Uint8Array(chunk)));
+				controller.close();
+			}
+		});
+		const size = downloadChunks.flat().length;
+		return new Response(body, { headers: { 'Dropbox-API-Result': JSON.stringify({ size }) } });
+	}
+	if (url.endsWith('/files/upload')) {
+		lastUploadedPath = args.path;
+		lastUploadedContents = init.body;
+		return new Response('{}', { status: 200 });
+	}
+	throw new Error(`Unhandled mock fetch: ${url}`);
+}) as typeof fetch;
 
 test('DropboxStorage isConfigured returns true when access token is set and valid', async () => {
 	const storage = new DropboxStorage({ clientId: 'mock-client' });
@@ -166,6 +180,23 @@ test('DropboxStorage readFile retrieves and parses file content', async () => {
 	const op = storage.readFile('/test-file.txt');
 	const data = await op.finished;
 	assert.deepStrictEqual(data, new Uint8Array([72, 101, 108, 108, 111]));
+});
+
+test('DropboxStorage readFile reports progress as the download streams in', async () => {
+	downloadChunks = [[1, 2], [3, 4], [5, 6]];
+	try {
+		const storage = new DropboxStorage({ clientId: 'mock-client' });
+		const op = storage.readFile('/big-file.bin');
+		const progress: [number, number][] = [];
+		op.on('progress', ({ loaded, total }) => progress.push([loaded, total]));
+
+		assert.deepStrictEqual([...(await op.finished)], [1, 2, 3, 4, 5, 6]);
+		// First chunk and completion always come through; the middle one may be throttled.
+		assert.deepStrictEqual(progress.at(0), [2, 6]);
+		assert.deepStrictEqual(progress.at(-1), [6, 6]);
+	} finally {
+		downloadChunks = [[72, 101, 108, 108, 111]];
+	}
 });
 
 test('DropboxStorage writeFile uploads contents directly on standard mode', async () => {
