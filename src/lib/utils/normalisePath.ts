@@ -17,3 +17,16 @@ export function normalisePath(path: string): string {
 	if (!clean || clean === '.' || clean === '/') return '/';
 	return clean.startsWith('/') ? clean : '/' + clean;
 }
+
+const CONFLICT_SUFFIX = '_updates';
+
+/**
+ * Returns true if the path points to an ephemeral conflict sidecar file (e.g. `/Notes/123_updates.md`).
+ */
+export function isConflictSidecar(path: string): boolean {
+	const lastSlash = path.lastIndexOf('/');
+	const filename = lastSlash === -1 ? path : path.slice(lastSlash + 1);
+	const lastDot = filename.lastIndexOf('.');
+	const stem = lastDot === -1 ? filename : filename.slice(0, lastDot);
+	return stem.endsWith(CONFLICT_SUFFIX);
+}

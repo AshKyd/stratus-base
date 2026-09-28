@@ -1,6 +1,6 @@
 import type { StorageBackend, StorageFileInfo, WriteOptions, SyncPhase, SyncProgress } from './types.ts';
 import { debounceAsync } from './utils/debounceAsync.ts';
-import { normalisePath } from './utils/normalisePath.ts';
+import { normalisePath, isConflictSidecar } from './utils/normalisePath.ts';
 import {
 	loadCredentials,
 	saveCredentials,
@@ -847,13 +847,11 @@ export class StratusBase extends EventTarget {
 	}
 
 	/**
-	 * Prunes the local OPFS copy of a conflict file and tombstones its metadata entry.
+	 * Prunes the local OPFS copy of a conflict file and removes or tombstones its metadata entry.
 	 *
-	 * The entry is marked `deleted` rather than dropped outright because a deletion only reaches other
-	 * clients as a tombstone. Conflict sidecars do get pushed to the remote — `consolidate()` packs
-	 * them, since an unresolved conflict deliberately keeps both versions — so dropping the record here
-	 * would let the next download of that chunk see a remote file with no local entry and recreate the
-	 * sidecar the person just resolved away. The push clears the tombstone once it has propagated.
+	 * Conflict sidecars are ephemeral local-only files; their metadata record is deleted directly
+	 * so it never enters the sync deleted list or gets pushed as a tombstone.
+	 * Regular synced files are marked `deleted` so the deletion propagates to remote clients.
 	 */
 	private async deleteLocalFileRecord(metadata: StratusMetadata, path: string): Promise<void> {
 		try {

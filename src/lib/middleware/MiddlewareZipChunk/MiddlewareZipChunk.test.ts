@@ -631,6 +631,29 @@ test('MiddlewareZipChunk sync runs', async (t) => {
 				'Merged by User 2'
 			);
 		});
+
+		await sub.test('A second conflict on the same file preserves the _updates file and does not get deleted by cumulative deletions', async () => {
+			// User 1 edits shared file and syncs
+			await client1.writeFile('/shared.txt', new TextEncoder().encode('User 1 update 2'));
+			await client1.sync();
+
+			// User 2 edits shared file locally
+			await client2.writeFile('/shared.txt', new TextEncoder().encode('User 2 update 2'));
+
+			// User 2 syncs -> should detect conflict again
+			let conflictThrown = false;
+			try {
+				await client2.sync();
+			} catch (err: any) {
+				conflictThrown = true;
+				assert.strictEqual(err.name, 'SyncConflictError');
+			}
+			assert.strictEqual(conflictThrown, true, 'SyncConflictError should be thrown');
+
+			// _updates file MUST exist and contain User 1's version, not deleted by cumulative deletions
+			const updatesContent = await client2.readFile('/shared_updates.txt');
+			assert.strictEqual(new TextDecoder().decode(updatesContent), 'User 1 update 2');
+		});
 	});
 
 	await t.test('Chunk freshness: a same-size remote edit is still pulled', async () => {

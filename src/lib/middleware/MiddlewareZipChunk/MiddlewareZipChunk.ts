@@ -8,7 +8,7 @@ import type {
 } from '../../StratusBase.ts';
 import { SyncConflictError } from '../../StratusBase.ts';
 import { SevenZipWriter, SevenZipReader, getJS7zWasmByteLength } from '../../utils/codec7z.ts';
-import { normalisePath } from '../../utils/normalisePath.ts';
+import { normalisePath, isConflictSidecar } from '../../utils/normalisePath.ts';
 
 /** What the remote listing tells us about a chunk, used to decide whether our cached copy is stale. */
 interface RemoteChunkInfo {
@@ -576,7 +576,8 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 		deletedPaths: string[],
 		created: string[],
 		updated: string[],
-		deleted: string[]
+		deleted: string[],
+		activeConflictSidecars: Set<string> = new Set()
 	): Promise<void> {
 		const localFiles = metadata.files;
 
@@ -600,6 +601,8 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 		// learn it is gone.
 		const cumulativeDeleted = new Set(currentChunk.deleted);
 		deletedPaths.forEach((path) => cumulativeDeleted.add(path));
+		// A conflict sidecar that is currently active for this sync is alive, so any prior deletion tombstone must be removed.
+		activeConflictSidecars.forEach((path) => cumulativeDeleted.delete(path));
 
 		let hasUnwrittenChanges = false;
 
@@ -812,10 +815,16 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 			metadata.chunks
 		);
 
+		const activeConflictSidecars = new Set(
+			conflicts.map((c) => this.appendUpdatesSuffix(c.path))
+		);
+
 		// Apply deletions from active chunk cumulative deleted list
 		if (activeChunk.deleted) {
 			await Promise.all(
 				activeChunk.deleted.map(async (path) => {
+					// Do not delete a conflict sidecar that was just generated in Phase 1 for this sync's active conflict!
+					if (activeConflictSidecars.has(path)) return;
 					const localFile = localFiles[path];
 					if (localFile && localFile.status === 'clean') {
 						await context.deleteLocalFile(path);
@@ -848,7 +857,8 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 				deletedPaths,
 				created,
 				updated,
-				deleted
+				deleted,
+				activeConflictSidecars
 			);
 		}
 
