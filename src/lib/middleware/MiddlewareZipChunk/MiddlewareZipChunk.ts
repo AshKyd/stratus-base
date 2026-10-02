@@ -320,12 +320,23 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 
 	/**
 	 * Encodes a files map and metadata into a ZIP and writes to the backend.
+	 *
+	 * When `uploadTracker` is provided, progress is reported as a fraction of the
+	 * total upload bytes across **all** chunks being written this sync rather than
+	 * 0→100 per individual archive.
 	 */
 	private async writeChunk(
 		context: StratusSyncContext,
 		chunkPath: string,
 		filesMap: Map<string, Uint8Array>,
-		chunkMeta: ChunkMetadata
+		chunkMeta: ChunkMetadata,
+		uploadTracker?: {
+			totalBytes: number;
+			totalChunks: number;
+			getCompletedBytes: () => number;
+			getCompletedChunks: () => number;
+			onChunkComplete: (uploadedBytes: number) => void;
+		}
 	): Promise<number> {
 		const metaContent = new TextEncoder().encode(JSON.stringify(chunkMeta, null, 2));
 		filesMap.set('.metadata.json', metaContent);
@@ -333,39 +344,79 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 		const zipBytes = await this.encodeZip(filesMap);
 		context.reportProgress({
 			phase: 'uploading',
-			totalBytes: zipBytes.length,
-			loadedBytes: 0,
+			totalBytes: uploadTracker?.totalBytes ?? zipBytes.length,
+			loadedBytes: uploadTracker?.getCompletedBytes() ?? 0,
+			totalFiles: uploadTracker?.totalChunks,
+			completedFiles: uploadTracker?.getCompletedChunks(),
 			currentFile: chunkPath,
-			percentage: 0,
+			percentage: uploadTracker && uploadTracker.totalBytes > 0
+				? Math.min(99, Math.round((uploadTracker.getCompletedBytes() / uploadTracker.totalBytes) * 100))
+				: 0,
 			message: `Uploading ${chunkPath}...`
 		});
 
 		const op = context.backend.writeFile(chunkPath, zipBytes, { atomic: this.atomic });
 		op.on('progress', ({ loaded, total }) =>
-			this.reportTransfer(context, 'uploading', chunkPath, loaded, total || zipBytes.length)
+			this.reportTransfer(
+				context,
+				'uploading',
+				chunkPath,
+				loaded,
+				total || zipBytes.length,
+				uploadTracker
+			)
 		);
 
 		await op.finished;
+		uploadTracker?.onChunkComplete(zipBytes.length);
 		return zipBytes.length;
 	}
 
-	/** Reports a single chunk's upload or download progress. */
+	/**
+	 * Reports upload or download progress for one chunk.
+	 *
+	 * For uploads with an `uploadTracker`, `loaded` and `total` are folded into the
+	 * running cross-chunk totals so the progress bar reflects all archives, not just
+	 * the one currently being written.
+	 */
 	private reportTransfer(
 		context: StratusSyncContext,
 		phase: 'uploading' | 'downloading',
 		chunkPath: string,
 		loaded: number,
-		total: number
+		total: number,
+		uploadTracker?: {
+			totalBytes: number;
+			totalChunks: number;
+			getCompletedBytes: () => number;
+			getCompletedChunks: () => number;
+			onChunkComplete: (uploadedBytes: number) => void;
+		}
 	): void {
 		const verb = phase === 'uploading' ? 'Uploading' : 'Downloading';
-		context.reportProgress({
-			phase,
-			totalBytes: total,
-			loadedBytes: loaded,
-			percentage: total > 0 ? Math.min(100, Math.round((loaded / total) * 100)) : 0,
-			currentFile: chunkPath,
-			message: `${verb} ${chunkPath}...`
-		});
+		if (uploadTracker && phase === 'uploading') {
+			const globalLoaded = uploadTracker.getCompletedBytes() + loaded;
+			const globalTotal = uploadTracker.totalBytes;
+			context.reportProgress({
+				phase,
+				totalBytes: globalTotal,
+				loadedBytes: globalLoaded,
+				totalFiles: uploadTracker.totalChunks,
+				completedFiles: uploadTracker.getCompletedChunks(),
+				percentage: globalTotal > 0 ? Math.min(99, Math.round((globalLoaded / globalTotal) * 100)) : 0,
+				currentFile: chunkPath,
+				message: `${verb} ${chunkPath}...`
+			});
+		} else {
+			context.reportProgress({
+				phase,
+				totalBytes: total,
+				loadedBytes: loaded,
+				percentage: total > 0 ? Math.min(100, Math.round((loaded / total) * 100)) : 0,
+				currentFile: chunkPath,
+				message: `${verb} ${chunkPath}...`
+			});
+		}
 	}
 
 	/**
@@ -564,6 +615,9 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 	/**
 	 * Sequentially writes dirty and deleted files across one or more chunks, performing
 	 * dynamic chunk rollovers when a chunk size limit is exceeded.
+	 *
+	 * `uploadTracker` is forwarded to each `flushChunk` call so progress events show
+	 * loaded/total across all archives rather than 0→100 per chunk.
 	 */
 	private async writeChangesToChunks(
 		context: StratusSyncContext,
@@ -583,7 +637,8 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 			targetPath: string;
 			chunk: ChunkMetadata;
 			zipLength: number;
-		}>
+		}>,
+		uploadTracker?: Parameters<MiddlewareZipChunk['writeChunk']>[4]
 	): Promise<void> {
 		const localFiles = metadata.files;
 
@@ -638,7 +693,8 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 					currentChunkPath,
 					currentChunk,
 					filesMap,
-					stagedChunks
+					stagedChunks,
+					uploadTracker
 				);
 
 				// 2. Rollover to new chunk
@@ -700,7 +756,8 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 				currentChunkPath,
 				currentChunk,
 				filesMap,
-				stagedChunks
+				stagedChunks,
+				uploadTracker
 			);
 		}
 	}
@@ -729,14 +786,15 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 			targetPath: string;
 			chunk: ChunkMetadata;
 			zipLength: number;
-		}>
+		}>,
+		uploadTracker?: Parameters<MiddlewareZipChunk['writeChunk']>[4]
 	): Promise<void> {
 		chunk.uncompressedSize = this.measureUncompressed(filesMap);
 
 		const tempPath = context.lockId
 			? `${chunkPath}.tmp.${context.lockId}`
 			: `/temp_sync_archive_chunk_${String(chunkNum).padStart(3, '0')}.7z`;
-		const zipLength = await this.writeChunk(context, tempPath, filesMap, chunk);
+		const zipLength = await this.writeChunk(context, tempPath, filesMap, chunk, uploadTracker);
 
 		if (stagedChunks) {
 			stagedChunks.push({
@@ -879,6 +937,35 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 			);
 
 			if (dirtyPaths.length > 0 || deletedPaths.length > 0) {
+				// Estimate how many chunks we'll produce so the upload bar can span all of them.
+				// The active chunk already has some uncompressed content, so its available
+				// headroom is subtracted before dividing the remaining dirty bytes.
+				const totalDirtyBytes = dirtyPaths.reduce(
+					(sum, p) => sum + (localFiles[p]?.size ?? 0),
+					0
+				);
+				const existingActiveBytes = activeChunk.uncompressedSize ?? 0;
+				const bytesNeedingNewChunks = Math.max(0, totalDirtyBytes - (this.chunkSizeLimit - existingActiveBytes));
+				// +1 for the active chunk itself; extra full chunks round up.
+				const estimatedChunks = 1 + Math.ceil(bytesNeedingNewChunks / this.chunkSizeLimit);
+				// Use raw uncompressed bytes as the estimate — localFiles[p].size is the
+				// pre-compression file size, so this is the most accurate figure we have
+				// before the archive is actually built.
+				const estimatedUploadBytes = Math.max(totalDirtyBytes, 1);
+
+				let completedUploadBytes = 0;
+				let completedUploadChunks = 0;
+				const uploadTracker = {
+					totalBytes: estimatedUploadBytes,
+					totalChunks: estimatedChunks,
+					getCompletedBytes: () => completedUploadBytes,
+					getCompletedChunks: () => completedUploadChunks,
+					onChunkComplete: (uploadedBytes: number) => {
+						completedUploadBytes += uploadedBytes;
+						completedUploadChunks++;
+					}
+				};
+
 				await this.writeChangesToChunks(
 					context,
 					metadata,
@@ -892,7 +979,8 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 					updated,
 					deleted,
 					activeConflictSidecars,
-					stagedChunks
+					stagedChunks,
+					uploadTracker
 				);
 			}
 
