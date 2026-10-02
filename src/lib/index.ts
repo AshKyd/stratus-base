@@ -14,11 +14,12 @@ export type { GithubStorageOptions } from './backends/GithubStorage.ts';
 export { S3Storage } from './backends/S3Storage.ts';
 export type { S3StorageOptions } from './backends/S3Storage.ts';
 
-export { StratusBase, SyncConflictError, SyncLockedError } from './StratusBase.ts';
+export { StratusBase, SyncConflictError, SyncLockedError, SyncLockLostError } from './StratusBase.ts';
 export type {
 	FileMetadata,
 	StratusMetadata,
 	SyncConflict,
+	SyncLockDetails,
 	SyncResult,
 	StratusSyncContext,
 	StratusMiddleware,

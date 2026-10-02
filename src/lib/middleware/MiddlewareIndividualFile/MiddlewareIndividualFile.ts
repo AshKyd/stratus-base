@@ -65,8 +65,9 @@ export class MiddlewareIndividualFile implements StratusMiddleware {
 			message: 'Listing remote files...'
 		});
 
-		const remoteFiles = (await this.listRemoteFilesRecursive(context.backend, '/'))
-			.filter((rf) => rf.path !== '/sync.lock');
+		const remoteFiles = (await this.listRemoteFilesRecursive(context.backend, '/')).filter(
+			(rf) => rf.path !== '/sync.lock' && !rf.path.includes('.tmp.')
+		);
 		const remoteMap = new Map<string, StorageFileInfo>();
 		for (const rf of remoteFiles) {
 			remoteMap.set(rf.path, rf);
@@ -81,161 +82,22 @@ export class MiddlewareIndividualFile implements StratusMiddleware {
 		const updated: string[] = [];
 		const deleted: string[] = [];
 
+		const stagedFiles: Array<{
+			tempPath: string;
+			targetPath: string;
+			isNew: boolean;
+		}> = [];
+
 		const totalFiles = allPaths.size;
 		let processedFiles = 0;
 
-		for (const path of allPaths) {
-			const remoteFile = remoteMap.get(path);
-			const localFile = localFiles[path];
+		try {
+			for (const path of allPaths) {
+				const remoteFile = remoteMap.get(path);
+				const localFile = localFiles[path];
 
-			if (remoteFile && !localFile) {
-				// Case A: Remote only (new file on remote)
-				if (context.sparse) {
-					localFiles[path] = {
-						path,
-						type: 'file',
-						size: remoteFile.size,
-						localModifiedAt: remoteFile.modifiedAt.getTime(),
-						remoteModifiedAt: remoteFile.modifiedAt.getTime(),
-						etag: remoteFile.etag,
-						status: 'clean'
-					};
-					created.push(path);
-				} else {
-					context.reportProgress({
-						phase: 'downloading',
-						totalFiles,
-						completedFiles: processedFiles,
-						totalBytes: remoteFile.size,
-						loadedBytes: 0,
-						currentFile: path,
-						message: `Downloading ${path}...`
-					});
-					const op = context.backend.readFile(path);
-					op.on('progress', ({ loaded, total }) => {
-						const percentage = total > 0 ? Math.min(100, Math.round((loaded / total) * 100)) : 0;
-						context.reportProgress({
-							phase: 'downloading',
-							totalFiles,
-							completedFiles: processedFiles,
-							totalBytes: total,
-							loadedBytes: loaded,
-							percentage,
-							currentFile: path,
-							message: `Downloading ${path}...`
-						});
-					});
-					const content = await op.finished;
-					await context.writeLocalFile(path, content);
-					localFiles[path] = {
-						path,
-						type: 'file',
-						size: remoteFile.size,
-						localModifiedAt: remoteFile.modifiedAt.getTime(),
-						remoteModifiedAt: remoteFile.modifiedAt.getTime(),
-						etag: remoteFile.etag,
-						status: 'clean'
-					};
-					created.push(path);
-				}
-			} else if (!remoteFile && localFile) {
-				// Local entry exists but not on remote
-				if (localFile.status === 'deleted') {
-					// Local only, already deleted, remove from metadata
-					delete localFiles[path];
-				} else if (localFile.status === 'dirty') {
-					// Case B: Local only (created locally, not yet on remote)
-					const content = await context.readLocalFile(path);
-					context.reportProgress({
-						phase: 'uploading',
-						totalFiles,
-						completedFiles: processedFiles,
-						totalBytes: content.length,
-						loadedBytes: 0,
-						currentFile: path,
-						message: `Uploading ${path}...`
-					});
-					const op = context.backend.writeFile(path, content, { atomic: this.options.atomic });
-					op.on('progress', ({ loaded, total }) => {
-						const totalBytes = total || content.length;
-						const percentage = totalBytes > 0 ? Math.min(100, Math.round((loaded / totalBytes) * 100)) : 0;
-						context.reportProgress({
-							phase: 'uploading',
-							totalFiles,
-							completedFiles: processedFiles,
-							totalBytes,
-							loadedBytes: loaded,
-							percentage,
-							currentFile: path,
-							message: `Uploading ${path}...`
-						});
-					});
-					await op.finished;
-
-					const stat = await context.backend.stat(path);
-					const modifiedAt = stat?.modifiedAt ?? new Date();
-					const etag = stat?.etag;
-
-					localFiles[path] = {
-						...localFile,
-						status: 'clean',
-						remoteModifiedAt: modifiedAt.getTime(),
-						etag
-					};
-					created.push(path);
-				} else if (localFile.status === 'clean') {
-					// Remote deleted it, and we didn't touch it locally
-					await context.deleteLocalFile(path);
-					delete localFiles[path];
-					deleted.push(path);
-				} else if (localFile.status === 'conflict') {
-					// Keep conflict status
-					conflicts.push({
-						path,
-						localModifiedAt: new Date(localFile.localModifiedAt),
-						remoteModifiedAt: new Date(0),
-						type: 'conflict'
-					});
-				}
-			} else if (remoteFile && localFile) {
-				// Case C: Exists in both remote and local
-				const remoteChanged =
-					remoteFile.modifiedAt.getTime() > localFile.remoteModifiedAt ||
-					(localFile.etag && remoteFile.etag && remoteFile.etag !== localFile.etag);
-
-				const localModified = localFile.status === 'dirty' || localFile.status === 'deleted';
-
-				if (remoteChanged && localModified) {
-					// Subcase C1: Remote Changed AND Local Modified (Conflict)
-					const op = context.backend.readFile(path);
-					const remoteContent = await op.finished;
-					const updatesPath = this.appendUpdatesSuffix(path);
-					await context.writeLocalFile(updatesPath, remoteContent);
-
-					localFiles[path] = {
-						...localFile,
-						status: 'conflict',
-						remoteModifiedAt: remoteFile.modifiedAt.getTime(),
-						etag: remoteFile.etag
-					};
-
-					localFiles[updatesPath] = {
-						path: updatesPath,
-						type: 'file',
-						size: remoteContent.length,
-						localModifiedAt: Date.now(),
-						remoteModifiedAt: 0,
-						status: 'clean'
-					};
-
-					conflicts.push({
-						path,
-						localModifiedAt: new Date(localFile.localModifiedAt),
-						remoteModifiedAt: remoteFile.modifiedAt,
-						type: 'conflict'
-					});
-				} else if (remoteChanged && !localModified) {
-					// Subcase C2: Remote Changed AND Local NOT Modified
+				if (remoteFile && !localFile) {
+					// Case A: Remote only (new file on remote)
 					if (context.sparse) {
 						localFiles[path] = {
 							path,
@@ -246,11 +108,31 @@ export class MiddlewareIndividualFile implements StratusMiddleware {
 							etag: remoteFile.etag,
 							status: 'clean'
 						};
-						// Delete local cache if it existed to enforce sparse read later
-						await context.deleteLocalFile(path);
-						updated.push(path);
+						created.push(path);
 					} else {
+						context.reportProgress({
+							phase: 'downloading',
+							totalFiles,
+							completedFiles: processedFiles,
+							totalBytes: remoteFile.size,
+							loadedBytes: 0,
+							currentFile: path,
+							message: `Downloading ${path}...`
+						});
 						const op = context.backend.readFile(path);
+						op.on('progress', ({ loaded, total }) => {
+							const percentage = total > 0 ? Math.min(100, Math.round((loaded / total) * 100)) : 0;
+							context.reportProgress({
+								phase: 'downloading',
+								totalFiles,
+								completedFiles: processedFiles,
+								totalBytes: total,
+								loadedBytes: loaded,
+								percentage,
+								currentFile: path,
+								message: `Downloading ${path}...`
+							});
+						});
 						const content = await op.finished;
 						await context.writeLocalFile(path, content);
 						localFiles[path] = {
@@ -262,49 +144,234 @@ export class MiddlewareIndividualFile implements StratusMiddleware {
 							etag: remoteFile.etag,
 							status: 'clean'
 						};
-						updated.push(path);
+						created.push(path);
 					}
-				} else if (!remoteChanged && localModified) {
-					// Subcase C3: Remote NOT Changed AND Local Modified (Dirty)
+				} else if (!remoteFile && localFile) {
+					// Local entry exists but not on remote
 					if (localFile.status === 'deleted') {
-						await context.backend.deleteFile(path);
+						// Local only, already deleted, remove from metadata
 						delete localFiles[path];
-						deleted.push(path);
 					} else if (localFile.status === 'dirty') {
+						// Case B: Local only (created locally, not yet on remote)
 						const content = await context.readLocalFile(path);
-						const op = context.backend.writeFile(path, content, { atomic: this.options.atomic });
+						context.reportProgress({
+							phase: 'uploading',
+							totalFiles,
+							completedFiles: processedFiles,
+							totalBytes: content.length,
+							loadedBytes: 0,
+							currentFile: path,
+							message: `Uploading ${path}...`
+						});
+
+						const uploadPath = context.lockId ? `${path}.tmp.${context.lockId}` : path;
+						const op = context.backend.writeFile(uploadPath, content, {
+							atomic: this.options.atomic
+						});
+						op.on('progress', ({ loaded, total }) => {
+							const totalBytes = total || content.length;
+							const percentage =
+								totalBytes > 0 ? Math.min(100, Math.round((loaded / totalBytes) * 100)) : 0;
+							context.reportProgress({
+								phase: 'uploading',
+								totalFiles,
+								completedFiles: processedFiles,
+								totalBytes,
+								loadedBytes: loaded,
+								percentage,
+								currentFile: path,
+								message: `Uploading ${path}...`
+							});
+						});
 						await op.finished;
 
-						const stat = await context.backend.stat(path);
-						const modifiedAt = stat?.modifiedAt ?? new Date();
-						const etag = stat?.etag;
+						if (context.lockId) {
+							stagedFiles.push({ tempPath: uploadPath, targetPath: path, isNew: true });
+						} else {
+							const stat = await context.backend.stat(path);
+							const modifiedAt = stat?.modifiedAt ?? new Date();
+							const etag = stat?.etag;
+
+							localFiles[path] = {
+								...localFile,
+								status: 'clean',
+								remoteModifiedAt: modifiedAt.getTime(),
+								etag
+							};
+							created.push(path);
+						}
+					} else if (localFile.status === 'clean') {
+						// Remote deleted it, and we didn't touch it locally
+						await context.deleteLocalFile(path);
+						delete localFiles[path];
+						deleted.push(path);
+					} else if (localFile.status === 'conflict') {
+						// Keep conflict status
+						conflicts.push({
+							path,
+							localModifiedAt: new Date(localFile.localModifiedAt),
+							remoteModifiedAt: new Date(0),
+							type: 'conflict'
+						});
+					}
+				} else if (remoteFile && localFile) {
+					// Case C: Exists in both remote and local
+					const remoteChanged =
+						remoteFile.modifiedAt.getTime() > localFile.remoteModifiedAt ||
+						(localFile.etag && remoteFile.etag && remoteFile.etag !== localFile.etag);
+
+					const localModified = localFile.status === 'dirty' || localFile.status === 'deleted';
+
+					if (remoteChanged && localModified) {
+						// Subcase C1: Remote Changed AND Local Modified (Conflict)
+						const op = context.backend.readFile(path);
+						const remoteContent = await op.finished;
+						const updatesPath = this.appendUpdatesSuffix(path);
+						await context.writeLocalFile(updatesPath, remoteContent);
 
 						localFiles[path] = {
 							...localFile,
+							status: 'conflict',
+							remoteModifiedAt: remoteFile.modifiedAt.getTime(),
+							etag: remoteFile.etag
+						};
+
+						localFiles[updatesPath] = {
+							path: updatesPath,
+							type: 'file',
+							size: remoteContent.length,
+							localModifiedAt: Date.now(),
+							remoteModifiedAt: 0,
+							status: 'clean'
+						};
+
+						conflicts.push({
+							path,
+							localModifiedAt: new Date(localFile.localModifiedAt),
+							remoteModifiedAt: remoteFile.modifiedAt,
+							type: 'conflict'
+						});
+					} else if (remoteChanged && !localModified) {
+						// Subcase C2: Remote Changed AND Local NOT Modified
+						if (context.sparse) {
+							localFiles[path] = {
+								path,
+								type: 'file',
+								size: remoteFile.size,
+								localModifiedAt: remoteFile.modifiedAt.getTime(),
+								remoteModifiedAt: remoteFile.modifiedAt.getTime(),
+								etag: remoteFile.etag,
+								status: 'clean'
+							};
+							// Delete local cache if it existed to enforce sparse read later
+							await context.deleteLocalFile(path);
+							updated.push(path);
+						} else {
+							const op = context.backend.readFile(path);
+							const content = await op.finished;
+							await context.writeLocalFile(path, content);
+							localFiles[path] = {
+								path,
+								type: 'file',
+								size: remoteFile.size,
+								localModifiedAt: remoteFile.modifiedAt.getTime(),
+								remoteModifiedAt: remoteFile.modifiedAt.getTime(),
+								etag: remoteFile.etag,
+								status: 'clean'
+							};
+							updated.push(path);
+						}
+					} else if (!remoteChanged && localModified) {
+						// Subcase C3: Remote NOT Changed AND Local Modified (Dirty)
+						if (localFile.status === 'deleted') {
+							await context.backend.deleteFile(path);
+							delete localFiles[path];
+							deleted.push(path);
+						} else if (localFile.status === 'dirty') {
+							const content = await context.readLocalFile(path);
+							const uploadPath = context.lockId ? `${path}.tmp.${context.lockId}` : path;
+							const op = context.backend.writeFile(uploadPath, content, {
+								atomic: this.options.atomic
+							});
+							await op.finished;
+
+							if (context.lockId) {
+								stagedFiles.push({ tempPath: uploadPath, targetPath: path, isNew: false });
+							} else {
+								const stat = await context.backend.stat(path);
+								const modifiedAt = stat?.modifiedAt ?? new Date();
+								const etag = stat?.etag;
+
+								localFiles[path] = {
+									...localFile,
+									status: 'clean',
+									remoteModifiedAt: modifiedAt.getTime(),
+									etag
+								};
+								updated.push(path);
+							}
+						}
+					}
+					// Subcase C4: Remote NOT Changed AND Local NOT Modified - do nothing
+				}
+				processedFiles++;
+			}
+
+			if (stagedFiles.length > 0) {
+				await context.assertLockValid();
+
+				await Promise.all(
+					stagedFiles.map(async (staged) => {
+						await context.backend.renameFile(staged.tempPath, staged.targetPath);
+						const stat = await context.backend.stat(staged.targetPath);
+						const modifiedAt = stat?.modifiedAt ?? new Date();
+						const etag = stat?.etag;
+						const targetLocalFile = localFiles[staged.targetPath];
+
+						localFiles[staged.targetPath] = {
+							...targetLocalFile,
 							status: 'clean',
 							remoteModifiedAt: modifiedAt.getTime(),
 							etag
 						};
-						updated.push(path);
-					}
-				}
-				// Subcase C4: Remote NOT Changed AND Local NOT Modified - do nothing
+
+						if (staged.isNew) {
+							created.push(staged.targetPath);
+						} else {
+							updated.push(staged.targetPath);
+						}
+					})
+				);
 			}
-			processedFiles++;
+
+			await context.saveLocalMetadata(metadata);
+
+			context.reportProgress({
+				phase: 'complete',
+				percentage: 100,
+				message: 'Synchronisation complete.'
+			});
+
+			if (conflicts.length > 0) {
+				throw new SyncConflictError(conflicts);
+			}
+
+			return { created, updated, deleted };
+		} finally {
+			if (stagedFiles.length > 0) {
+				await Promise.all(
+					stagedFiles.map(async (staged) => {
+						try {
+							const stat = await context.backend.stat(staged.tempPath);
+							if (stat) {
+								await context.backend.deleteFile(staged.tempPath);
+							}
+						} catch {
+							// Ignore cleanup errors
+						}
+					})
+				);
+			}
 		}
-
-		await context.saveLocalMetadata(metadata);
-
-		context.reportProgress({
-			phase: 'complete',
-			percentage: 100,
-			message: 'Synchronisation complete.'
-		});
-
-		if (conflicts.length > 0) {
-			throw new SyncConflictError(conflicts);
-		}
-
-		return { created, updated, deleted };
 	}
 }

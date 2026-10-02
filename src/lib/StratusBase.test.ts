@@ -600,6 +600,82 @@ test('StratusBase remote lockfile concurrency control', async (t) => {
 	assert.strictEqual(lockFileExists, false); // Lock is cleaned up after successful forceSync
 });
 
+test('StratusBase lock validation and interrupted sync lock protection', async () => {
+	const storageMock = new MockStorageManager();
+	setStorageManager(storageMock);
+
+	const backend = new MockBackend();
+	let lockContent: any = null;
+
+	(backend as any).stat = async (path: string) => {
+		if (path === '/sync.lock' && lockContent) {
+			return { path: '/sync.lock', name: 'sync.lock', type: 'file', size: 100, modifiedAt: new Date() };
+		}
+		return null;
+	};
+	(backend as any).readFile = (path: string) => {
+		if (path === '/sync.lock' && lockContent) {
+			const bytes = new TextEncoder().encode(JSON.stringify(lockContent));
+			return { finished: Promise.resolve(bytes) };
+		}
+		throw new Error('File not found');
+	};
+	(backend as any).writeFile = (path: string, content: Uint8Array) => {
+		if (path === '/sync.lock') {
+			lockContent = JSON.parse(new TextDecoder().decode(content));
+		}
+		return { finished: Promise.resolve() };
+	};
+	(backend as any).deleteFile = async (path: string) => {
+		if (path === '/sync.lock') {
+			lockContent = null;
+		}
+	};
+
+	const { SyncLockLostError } = await import('./StratusBase.ts');
+
+	let middlewareCalled = false;
+	const lockStolenMiddleware = {
+		async sync(context: any) {
+			middlewareCalled = true;
+			assert.ok(context.lockId);
+			// Verify initial lock works
+			await context.assertLockValid();
+
+			// Simulate Device B stealing the lock mid-sync
+			lockContent = {
+				lockId: 'device-b-lock-id',
+				date: new Date().toISOString(),
+				clientName: 'Device B',
+				operation: 'sync'
+			};
+
+			// Calling assertLockValid now must throw SyncLockLostError
+			await assert.rejects(async () => {
+				await context.assertLockValid();
+			}, SyncLockLostError);
+
+			throw new SyncLockLostError('Lock lost to Device B');
+		}
+	};
+
+	const stratus = new StratusBase({
+		backend,
+		localRoot: '/app_lock_test',
+		middleware: lockStolenMiddleware,
+		clientName: 'Device A'
+	});
+
+	await assert.rejects(async () => {
+		await stratus.sync();
+	}, SyncLockLostError);
+
+	assert.ok(middlewareCalled);
+	// Finally block must NOT delete Device B's lock
+	assert.ok(lockContent);
+	assert.strictEqual(lockContent.lockId, 'device-b-lock-id');
+});
+
 test('StratusBase isSetUp delegates to middleware', async () => {
 	let isSetUpCalledWithContext = false;
 	const customMiddleware = {

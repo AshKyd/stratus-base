@@ -254,7 +254,7 @@ test('MiddlewareIndividualFile sync runs', async (t) => {
 		await stratus.writeFile('/atomic.md', new TextEncoder().encode('Atomic data'));
 		await stratus.sync();
 
-		assert.ok(backend.atomicWritesTracked.includes('/atomic.md'));
+		assert.ok(backend.atomicWritesTracked.some((p) => p.startsWith('/atomic.md')));
 	});
 
 	await t.test('isSetUp returns false on empty storage and true when files or folders exist', async () => {

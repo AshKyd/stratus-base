@@ -45,6 +45,13 @@ export interface SyncConflict {
 	type: 'conflict';
 }
 
+export interface SyncLockDetails {
+	lockId?: string;
+	date: string;
+	clientName: string;
+	operation: string;
+}
+
 export class SyncConflictError extends Error {
 	public conflicts: SyncConflict[];
 	constructor(conflicts: SyncConflict[]) {
@@ -55,11 +62,20 @@ export class SyncConflictError extends Error {
 }
 
 export class SyncLockedError extends Error {
-	public lockDetails: { date: string; clientName: string; operation: string };
-	constructor(lockDetails: { date: string; clientName: string; operation: string }) {
-		super(`Sync is locked by ${lockDetails.clientName} since ${lockDetails.date} (Operation: ${lockDetails.operation})`);
+	public lockDetails: SyncLockDetails;
+	constructor(lockDetails: SyncLockDetails) {
+		super(
+			`Sync is locked by ${lockDetails.clientName} since ${lockDetails.date} (Operation: ${lockDetails.operation})`
+		);
 		this.name = 'SyncLockedError';
 		this.lockDetails = lockDetails;
+	}
+}
+
+export class SyncLockLostError extends Error {
+	constructor(message = 'Sync lock was released or acquired by another device.') {
+		super(message);
+		this.name = 'SyncLockLostError';
 	}
 }
 
@@ -73,6 +89,8 @@ export interface StratusSyncContext {
 	backend: StorageBackend;
 	localRoot: string;
 	sparse: boolean;
+	lockId: string;
+	assertLockValid(): Promise<void>;
 	getLocalMetadata(): Promise<StratusMetadata>;
 	saveLocalMetadata(metadata: StratusMetadata): Promise<void>;
 	readLocalFile(path: string): Promise<Uint8Array>;
@@ -622,11 +640,26 @@ export class StratusBase extends EventTarget {
 	/**
 	 * Creates a standard sync context bound to this StratusBase instance.
 	 */
-	private createSyncContext(): StratusSyncContext {
+	private createSyncContext(lockId = ''): StratusSyncContext {
 		return {
 			backend: this.backend,
 			localRoot: this.localRoot,
 			sparse: this.sparse,
+			lockId,
+			assertLockValid: async (): Promise<void> => {
+				if (!lockId) return;
+				try {
+					const op = this.backend.readFile('/sync.lock');
+					const bytes = await op.finished;
+					const details: SyncLockDetails = JSON.parse(new TextDecoder().decode(bytes));
+					if (details.lockId !== lockId) {
+						throw new SyncLockLostError();
+					}
+				} catch (err) {
+					if (err instanceof SyncLockLostError) throw err;
+					throw new SyncLockLostError();
+				}
+			},
 			getLocalMetadata: () => this.getMetadata(),
 			saveLocalMetadata: (meta) => this.saveMetadata(meta),
 			readLocalFile: async (path) => {
@@ -771,7 +804,11 @@ export class StratusBase extends EventTarget {
 		// Concurrency Check (Cooperative Lockfile)
 		const lockStat = await this.backend.stat('/sync.lock');
 		if (lockStat) {
-			let lockDetails = { date: new Date().toISOString(), clientName: 'Unknown Client', operation: 'sync' };
+			let lockDetails: SyncLockDetails = {
+				date: new Date().toISOString(),
+				clientName: 'Unknown Client',
+				operation: 'sync'
+			};
 			try {
 				const op = this.backend.readFile('/sync.lock');
 				const bytes = await op.finished;
@@ -786,8 +823,13 @@ export class StratusBase extends EventTarget {
 			throw lockError;
 		}
 
-		// Write lockfile
-		const lockDetails = {
+		// Write lockfile with unique lockId
+		const lockId =
+			typeof crypto !== 'undefined' && crypto.randomUUID
+				? crypto.randomUUID()
+				: `${this.clientName}-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
+		const lockDetails: SyncLockDetails = {
+			lockId,
 			date: new Date().toISOString(),
 			clientName: this.clientName,
 			operation: 'sync'
@@ -796,7 +838,7 @@ export class StratusBase extends EventTarget {
 		await this.backend.writeFile('/sync.lock', lockBytes).finished;
 
 		try {
-			const context = this.createSyncContext();
+			const context = this.createSyncContext(lockId);
 
 			this.emit('syncstart');
 
@@ -815,7 +857,12 @@ export class StratusBase extends EventTarget {
 			}
 		} finally {
 			try {
-				await this.backend.deleteFile('/sync.lock');
+				const op = this.backend.readFile('/sync.lock');
+				const bytes = await op.finished;
+				const currentLock: SyncLockDetails = JSON.parse(new TextDecoder().decode(bytes));
+				if (currentLock.lockId === lockId) {
+					await this.backend.deleteFile('/sync.lock');
+				}
 			} catch {
 				// Ignore errors deleting lockfile on cleanup
 			}

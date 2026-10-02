@@ -577,7 +577,13 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 		created: string[],
 		updated: string[],
 		deleted: string[],
-		activeConflictSidecars: Set<string> = new Set()
+		activeConflictSidecars: Set<string> = new Set(),
+		stagedChunks?: Array<{
+			tempPath: string;
+			targetPath: string;
+			chunk: ChunkMetadata;
+			zipLength: number;
+		}>
 	): Promise<void> {
 		const localFiles = metadata.files;
 
@@ -631,7 +637,8 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 					currentChunkNum,
 					currentChunkPath,
 					currentChunk,
-					filesMap
+					filesMap,
+					stagedChunks
 				);
 
 				// 2. Rollover to new chunk
@@ -692,7 +699,8 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 				currentChunkNum,
 				currentChunkPath,
 				currentChunk,
-				filesMap
+				filesMap,
+				stagedChunks
 			);
 		}
 	}
@@ -715,18 +723,35 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 		chunkNum: number,
 		chunkPath: string,
 		chunk: ChunkMetadata,
-		filesMap: Map<string, Uint8Array>
+		filesMap: Map<string, Uint8Array>,
+		stagedChunks?: Array<{
+			tempPath: string;
+			targetPath: string;
+			chunk: ChunkMetadata;
+			zipLength: number;
+		}>
 	): Promise<void> {
 		chunk.uncompressedSize = this.measureUncompressed(filesMap);
 
-		const tempPath = `/temp_sync_archive_chunk_${String(chunkNum).padStart(3, '0')}.7z`;
+		const tempPath = context.lockId
+			? `${chunkPath}.tmp.${context.lockId}`
+			: `/temp_sync_archive_chunk_${String(chunkNum).padStart(3, '0')}.7z`;
 		const zipLength = await this.writeChunk(context, tempPath, filesMap, chunk);
-		await context.backend.renameFile(tempPath, chunkPath);
 
-		metadata.chunks[chunkPath] = {
-			...chunk,
-			...this.chunkRemoteInfo(await context.backend.stat(chunkPath), zipLength)
-		};
+		if (stagedChunks) {
+			stagedChunks.push({
+				tempPath,
+				targetPath: chunkPath,
+				chunk: { ...chunk },
+				zipLength
+			});
+		} else {
+			await context.backend.renameFile(tempPath, chunkPath);
+			metadata.chunks[chunkPath] = {
+				...chunk,
+				...this.chunkRemoteInfo(await context.backend.stat(chunkPath), zipLength)
+			};
+		}
 	}
 
 	async sync(context: StratusSyncContext): Promise<SyncResult> {
@@ -743,138 +768,178 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 		const updated: string[] = [];
 		const deleted: string[] = [];
 
-		context.reportProgress({
-			phase: 'listing',
-			message: 'Checking remote chunks...'
-		});
+		const stagedChunks: Array<{
+			tempPath: string;
+			targetPath: string;
+			chunk: ChunkMetadata;
+			zipLength: number;
+		}> = [];
 
-		const remoteChunks = await this.listRemoteChunks(context.backend);
-
-		// ==========================================
-		// Phase 1: Pull & Extract (Remote updates)
-		// ==========================================
-		const chunksToDownload = remoteChunks.filter((rc) =>
-			this.isChunkStale(metadata.chunks![rc.path], rc)
-		);
-
-		const totalChunks = chunksToDownload.length;
-		const totalBytes = chunksToDownload.reduce((acc, c) => acc + (c.size ?? 0), 0);
-		let completedBytes = 0;
-		let completedChunks = 0;
-
-		if (totalChunks > 0) {
+		try {
 			context.reportProgress({
-				phase: 'downloading',
-				totalBytes,
-				loadedBytes: 0,
-				totalFiles: totalChunks,
-				completedFiles: 0,
-				percentage: 0,
-				message: `Downloading ${totalChunks} archive chunk(s)...`
+				phase: 'listing',
+				message: 'Checking remote chunks...'
 			});
-		}
 
-		await chunksToDownload.reduce(async (promise, rc) => {
-			await promise;
-			await this.downloadAndExtractChunk(
-				context,
-				rc,
-				metadata,
-				conflicts,
-				created,
-				updated,
-				{
+			const remoteChunks = await this.listRemoteChunks(context.backend);
+
+			// ==========================================
+			// Phase 1: Pull & Extract (Remote updates)
+			// ==========================================
+			const chunksToDownload = remoteChunks.filter((rc) =>
+				this.isChunkStale(metadata.chunks![rc.path], rc)
+			);
+
+			const totalChunks = chunksToDownload.length;
+			const totalBytes = chunksToDownload.reduce((acc, c) => acc + (c.size ?? 0), 0);
+			let completedBytes = 0;
+			let completedChunks = 0;
+
+			if (totalChunks > 0) {
+				context.reportProgress({
+					phase: 'downloading',
 					totalBytes,
-					totalChunks,
-					getCompletedBytes: () => completedBytes,
-					getCompletedChunks: () => completedChunks,
-					onChunkDownloadComplete: (chunkBytesLength: number) => {
-						completedBytes += rc.size || chunkBytesLength;
-						completedChunks++;
+					loadedBytes: 0,
+					totalFiles: totalChunks,
+					completedFiles: 0,
+					percentage: 0,
+					message: `Downloading ${totalChunks} archive chunk(s)...`
+				});
+			}
+
+			await chunksToDownload.reduce(async (promise, rc) => {
+				await promise;
+				await this.downloadAndExtractChunk(
+					context,
+					rc,
+					metadata,
+					conflicts,
+					created,
+					updated,
+					{
+						totalBytes,
+						totalChunks,
+						getCompletedBytes: () => completedBytes,
+						getCompletedChunks: () => completedChunks,
+						onChunkDownloadComplete: (chunkBytesLength: number) => {
+							completedBytes += rc.size || chunkBytesLength;
+							completedChunks++;
+						}
 					}
-				}
-			);
-		}, Promise.resolve());
+				);
+			}, Promise.resolve());
 
-		// ==========================================
-		// Phase 2: Apply Cumulative Deletions
-		// ==========================================
-		let activeChunkNum = 1;
-		let activeChunkPath = this.formatChunkPath(activeChunkNum);
+			// ==========================================
+			// Phase 2: Apply Cumulative Deletions
+			// ==========================================
+			let activeChunkNum = 1;
+			let activeChunkPath = this.formatChunkPath(activeChunkNum);
 
-		if (remoteChunks.length > 0) {
-			const highest = remoteChunks[remoteChunks.length - 1];
-			activeChunkNum = highest.num;
-			activeChunkPath = highest.path;
-		}
+			if (remoteChunks.length > 0) {
+				const highest = remoteChunks[remoteChunks.length - 1];
+				activeChunkNum = highest.num;
+				activeChunkPath = highest.path;
+			}
 
-		const activeChunk = await this.initialiseActiveChunk(
-			context,
-			activeChunkPath,
-			remoteChunks,
-			metadata.chunks
-		);
-
-		const activeConflictSidecars = new Set(
-			conflicts.map((c) => this.appendUpdatesSuffix(c.path))
-		);
-
-		// Apply deletions from active chunk cumulative deleted list
-		if (activeChunk.deleted) {
-			await Promise.all(
-				activeChunk.deleted.map(async (path) => {
-					// Do not delete a conflict sidecar that was just generated in Phase 1 for this sync's active conflict!
-					if (activeConflictSidecars.has(path)) return;
-					const localFile = localFiles[path];
-					if (localFile && localFile.status === 'clean') {
-						await context.deleteLocalFile(path);
-						delete localFiles[path];
-						deleted.push(path);
-					}
-				})
-			);
-		}
-
-		// ==========================================
-		// Phase 3: Push & Append (Local changes)
-		// ==========================================
-		const dirtyPaths = Object.keys(localFiles).filter(
-			(path) => localFiles[path].status === 'dirty'
-		);
-		const deletedPaths = Object.keys(localFiles).filter(
-			(path) => localFiles[path].status === 'deleted'
-		);
-
-		if (dirtyPaths.length > 0 || deletedPaths.length > 0) {
-			await this.writeChangesToChunks(
+			const activeChunk = await this.initialiseActiveChunk(
 				context,
-				metadata,
-				activeChunkNum,
 				activeChunkPath,
-				activeChunk,
 				remoteChunks,
-				dirtyPaths,
-				deletedPaths,
-				created,
-				updated,
-				deleted,
-				activeConflictSidecars
+				metadata.chunks
 			);
+
+			const activeConflictSidecars = new Set(
+				conflicts.map((c) => this.appendUpdatesSuffix(c.path))
+			);
+
+			// Apply deletions from active chunk cumulative deleted list
+			if (activeChunk.deleted) {
+				await Promise.all(
+					activeChunk.deleted.map(async (path) => {
+						// Do not delete a conflict sidecar that was just generated in Phase 1 for this sync's active conflict!
+						if (activeConflictSidecars.has(path)) return;
+						const localFile = localFiles[path];
+						if (localFile && localFile.status === 'clean') {
+							await context.deleteLocalFile(path);
+							delete localFiles[path];
+							deleted.push(path);
+						}
+					})
+				);
+			}
+
+			// ==========================================
+			// Phase 3: Push & Append (Local changes)
+			// ==========================================
+			const dirtyPaths = Object.keys(localFiles).filter(
+				(path) => localFiles[path].status === 'dirty'
+			);
+			const deletedPaths = Object.keys(localFiles).filter(
+				(path) => localFiles[path].status === 'deleted'
+			);
+
+			if (dirtyPaths.length > 0 || deletedPaths.length > 0) {
+				await this.writeChangesToChunks(
+					context,
+					metadata,
+					activeChunkNum,
+					activeChunkPath,
+					activeChunk,
+					remoteChunks,
+					dirtyPaths,
+					deletedPaths,
+					created,
+					updated,
+					deleted,
+					activeConflictSidecars,
+					stagedChunks
+				);
+			}
+
+			if (stagedChunks.length > 0) {
+				await context.assertLockValid();
+
+				await Promise.all(
+					stagedChunks.map(async (staged) => {
+						await context.backend.renameFile(staged.tempPath, staged.targetPath);
+						const stat = await context.backend.stat(staged.targetPath);
+						metadata.chunks[staged.targetPath] = {
+							...staged.chunk,
+							...this.chunkRemoteInfo(stat, staged.zipLength)
+						};
+					})
+				);
+			}
+
+			await context.saveLocalMetadata(metadata);
+
+			context.reportProgress({
+				phase: 'complete',
+				percentage: 100,
+				message: 'Synchronisation complete.'
+			});
+
+			if (conflicts.length > 0) {
+				throw new SyncConflictError(conflicts);
+			}
+
+			return { created, updated, deleted };
+		} finally {
+			if (stagedChunks.length > 0) {
+				await Promise.all(
+					stagedChunks.map(async (staged) => {
+						try {
+							const stat = await context.backend.stat(staged.tempPath);
+							if (stat) {
+								await context.backend.deleteFile(staged.tempPath);
+							}
+						} catch {
+							// Ignore cleanup errors
+						}
+					})
+				);
+			}
 		}
-
-		await context.saveLocalMetadata(metadata);
-
-		context.reportProgress({
-			phase: 'complete',
-			percentage: 100,
-			message: 'Synchronisation complete.'
-		});
-
-		if (conflicts.length > 0) {
-			throw new SyncConflictError(conflicts);
-		}
-
-		return { created, updated, deleted };
 	}
 
 	async consolidate(context: StratusSyncContext): Promise<void> {
