@@ -8,6 +8,7 @@ import type {
 import { BaseStorageOperation } from '../utils/BaseStorageOperation.ts';
 import { clearCredentials } from '../utils/CredentialManager.ts';
 import { readBodyWithProgress, uploadWithProgress } from '../utils/httpTransfer.ts';
+import { noStoreFetch } from '../utils/noStoreFetch.ts';
 
 /**
  * Authentication lifecycle events emitted by {@link GoogleDriveStorage}.
@@ -419,7 +420,7 @@ export class GoogleDriveStorage extends EventTarget implements StorageBackend {
 	 * token. Callers still receive the response so existing error handling applies.
 	 */
 	private async fetchWithAuth(url: string, init: RequestInit = {}): Promise<Response> {
-		const response = await fetch(url, {
+		const response = await noStoreFetch(url, {
 			...init,
 			headers: { ...init.headers, Authorization: `Bearer ${this.accessToken}` }
 		});

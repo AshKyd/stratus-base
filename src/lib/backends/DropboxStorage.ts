@@ -9,6 +9,7 @@ import type {
 import { BaseStorageOperation } from '../utils/BaseStorageOperation.ts';
 import { clearCredentials } from '../utils/CredentialManager.ts';
 import { httpError, readBodyWithProgress, uploadWithProgress } from '../utils/httpTransfer.ts';
+import { noStoreFetch } from '../utils/noStoreFetch.ts';
 
 const VERIFIER_KEY = 'dropbox_code_verifier';
 
@@ -106,8 +107,10 @@ export class DropboxStorage extends EventTarget implements StorageBackend {
 		if (options.credentials) {
 			this.setCredentials(options.credentials);
 		}
+		// Dropbox API calls are POSTs, which browsers don't cache, but no-store keeps that guaranteed.
 		this.client = new Dropbox({
-			auth: this.auth
+			auth: this.auth,
+			fetch: noStoreFetch
 		});
 	}
 
@@ -330,7 +333,7 @@ export class DropboxStorage extends EventTarget implements StorageBackend {
 	readFile(path: string): StorageOperation<Uint8Array> {
 		return new BaseStorageOperation(async (signal, onProgress) => {
 			try {
-				const response = await fetch(`${CONTENT_API}/files/download`, {
+				const response = await noStoreFetch(`${CONTENT_API}/files/download`, {
 					method: 'POST',
 					headers: await this.contentHeaders({ path }),
 					signal

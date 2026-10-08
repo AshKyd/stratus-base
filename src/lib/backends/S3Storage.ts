@@ -78,6 +78,10 @@ export class S3Storage extends EventTarget implements StorageBackend {
 	/** (Re)creates both clients from the current options. */
 	private buildClients(): void {
 		const config = {
+			// Reads must bypass the browser HTTP cache. S3 sends no Cache-Control, so browsers guess a
+			// freshness period from Last-Modified and can keep serving a deleted `/sync.lock`. The
+			// browser runtime passes this to FetchHttpHandler; the Node handler ignores it.
+			requestHandler: { cache: 'no-store' as const },
 			region: this.options.region,
 			endpoint: this.options.endpoint,
 			forcePathStyle: this.options.forcePathStyle ?? false,

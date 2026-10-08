@@ -7,6 +7,7 @@ import type {
 } from '../types.ts';
 import { BaseStorageOperation } from '../utils/BaseStorageOperation.ts';
 import { clearCredentials } from '../utils/CredentialManager.ts';
+import { noStoreFetch } from '../utils/noStoreFetch.ts';
 
 /**
  * Configuration options for initializing the GitHub storage backend.
@@ -138,7 +139,7 @@ export class GithubStorage extends EventTarget implements StorageBackend {
 	 */
 	private async fetchWithAuth(url: string, init: RequestInit = {}): Promise<Response> {
 		const headers = { ...this.getHeaders(), ...(init.headers || {}) };
-		const res = await fetch(url, { ...init, headers });
+		const res = await noStoreFetch(url, { ...init, headers });
 		if (res.status === 401 || (res.status === 403 && res.headers.get('x-ratelimit-remaining') !== '0')) {
 			this.dispatchEvent(new CustomEvent('reauthrequired', { detail: { reason: 'unauthorised' } }));
 		}
