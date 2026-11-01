@@ -10,6 +10,7 @@ import { BaseStorageOperation } from '../utils/BaseStorageOperation.ts';
 import { clearCredentials } from '../utils/CredentialManager.ts';
 import { httpError, readBodyWithProgress, uploadWithProgress } from '../utils/httpTransfer.ts';
 import { noStoreFetch } from '../utils/noStoreFetch.ts';
+import { safeSessionStorage } from '../utils/safeStorage.ts';
 
 const VERIFIER_KEY = 'dropbox_code_verifier';
 
@@ -181,9 +182,7 @@ export class DropboxStorage extends EventTarget implements StorageBackend {
 			true
 		);
 		const verifier = this.auth.getCodeVerifier();
-		if (typeof window !== 'undefined' && verifier) {
-			window.sessionStorage.setItem(VERIFIER_KEY, verifier);
-		}
+		if (verifier) safeSessionStorage.setItem(VERIFIER_KEY, verifier);
 		return url;
 	}
 
@@ -196,12 +195,10 @@ export class DropboxStorage extends EventTarget implements StorageBackend {
 	 * @returns The exchanged storage credentials.
 	 */
 	async exchangeCode(code: string, redirectUri: string): Promise<StorageAuthCredentials> {
-		if (typeof window !== 'undefined') {
-			const verifier = window.sessionStorage.getItem(VERIFIER_KEY);
-			if (verifier) {
-				this.auth.setCodeVerifier(verifier);
-				window.sessionStorage.removeItem(VERIFIER_KEY);
-			}
+		const verifier = safeSessionStorage.getItem(VERIFIER_KEY);
+		if (verifier) {
+			this.auth.setCodeVerifier(verifier);
+			safeSessionStorage.removeItem(VERIFIER_KEY);
 		}
 
 		try {
