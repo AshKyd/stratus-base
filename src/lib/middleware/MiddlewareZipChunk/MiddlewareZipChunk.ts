@@ -1,3 +1,4 @@
+import { mapLimit } from 'async';
 import type { StorageBackend, StorageFileInfo } from '../../types.ts';
 import type {
 	StratusMiddleware,
@@ -9,6 +10,23 @@ import type {
 import { SyncConflictError } from '../../StratusBase.ts';
 import { SevenZipWriter, SevenZipReader, probeJS7z } from '../../utils/codec7z.ts';
 import { normalisePath, isConflictSidecar } from '../../utils/normalisePath.ts';
+
+/**
+ * How many chunk downloads may run ahead of the one being decrypted. Decrypting is CPU-bound and
+ * downloading is network-bound, so overlapping them hides the round trip per chunk. Capped because
+ * every prefetched chunk sits in memory until its turn to be extracted.
+ */
+export const MAX_PREFETCH_CHUNKS = 4;
+
+/** Shared, mutable progress for one pull (Phase 1) across all chunk downloads. */
+interface PullProgress {
+	totalBytes: number;
+	totalChunks: number;
+	completedBytes: number;
+	completedChunks: number;
+	/** Bytes received so far for each download still running, keyed by chunk path. */
+	inFlightLoaded: Map<string, number>;
+}
 
 /** What the remote listing tells us about a chunk, used to decide whether our cached copy is stale. */
 interface RemoteChunkInfo {
@@ -348,9 +366,13 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 			totalFiles: uploadTracker?.totalChunks,
 			completedFiles: uploadTracker?.getCompletedChunks(),
 			currentFile: chunkPath,
-			percentage: uploadTracker && uploadTracker.totalBytes > 0
-				? Math.min(99, Math.round((uploadTracker.getCompletedBytes() / uploadTracker.totalBytes) * 100))
-				: 0,
+			percentage:
+				uploadTracker && uploadTracker.totalBytes > 0
+					? Math.min(
+							99,
+							Math.round((uploadTracker.getCompletedBytes() / uploadTracker.totalBytes) * 100)
+						)
+					: 0,
 			message: `Uploading ${chunkPath}...`
 		});
 
@@ -402,7 +424,8 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 				loadedBytes: globalLoaded,
 				totalFiles: uploadTracker.totalChunks,
 				completedFiles: uploadTracker.getCompletedChunks(),
-				percentage: globalTotal > 0 ? Math.min(99, Math.round((globalLoaded / globalTotal) * 100)) : 0,
+				percentage:
+					globalTotal > 0 ? Math.min(99, Math.round((globalLoaded / globalTotal) * 100)) : 0,
 				currentFile: chunkPath,
 				message: `${verb} ${chunkPath}...`
 			});
@@ -431,61 +454,70 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 	}
 
 	/**
-	 * Downloads a remote chunk, extracts its entries, and handles conflicts.
+	 * Downloads a remote chunk's bytes. Several of these run at once (see `MAX_PREFETCH_CHUNKS`), so
+	 * progress is summed across every in-flight download in `pull` rather than tracked per chunk.
 	 */
-	private async downloadAndExtractChunk(
+	private async downloadChunk(
 		context: StratusSyncContext,
 		rc: RemoteChunkInfo,
+		pull: PullProgress
+	): Promise<Uint8Array> {
+		const op = context.backend.readFile(rc.path);
+
+		op.on('progress', ({ loaded }) => {
+			pull.inFlightLoaded.set(rc.path, loaded);
+			context.reportProgress({
+				phase: 'downloading',
+				totalBytes: pull.totalBytes,
+				loadedBytes: this.pullLoadedBytes(pull),
+				totalFiles: pull.totalChunks,
+				completedFiles: pull.completedChunks,
+				percentage: this.pullPercentage(pull),
+				currentFile: rc.path,
+				message: `Downloading ${rc.path}...`
+			});
+		});
+
+		const bytes = await op.finished;
+		pull.inFlightLoaded.delete(rc.path);
+		pull.completedBytes += rc.size || bytes.length;
+		pull.completedChunks++;
+		return bytes;
+	}
+
+	/** Bytes received so far across finished and in-flight chunk downloads. */
+	private pullLoadedBytes(pull: PullProgress): number {
+		return [...pull.inFlightLoaded.values()].reduce(
+			(sum, loaded) => sum + loaded,
+			pull.completedBytes
+		);
+	}
+
+	private pullPercentage(pull: PullProgress): number {
+		if (pull.totalBytes <= 0) return 0;
+		return Math.min(100, Math.round((this.pullLoadedBytes(pull) / pull.totalBytes) * 100));
+	}
+
+	/**
+	 * Decrypts an already downloaded chunk, extracts its entries, and handles conflicts.
+	 */
+	private async extractChunk(
+		context: StratusSyncContext,
+		rc: RemoteChunkInfo,
+		bytes: Uint8Array,
 		metadata: any,
 		conflicts: SyncConflict[],
 		created: string[],
 		updated: string[],
-		progressTracker?: {
-			totalBytes: number;
-			totalChunks: number;
-			getCompletedBytes: () => number;
-			getCompletedChunks: () => number;
-			onChunkDownloadComplete: (chunkBytesLength: number) => void;
-		}
+		pull: PullProgress
 	): Promise<void> {
-		const op = context.backend.readFile(rc.path);
-
-		if (progressTracker) {
-			op.on('progress', ({ loaded }) => {
-				const currentLoaded = progressTracker.getCompletedBytes() + loaded;
-				const totalBytes = progressTracker.totalBytes;
-				const percentage =
-					totalBytes > 0 ? Math.min(100, Math.round((currentLoaded / totalBytes) * 100)) : 0;
-
-				context.reportProgress({
-					phase: 'downloading',
-					totalBytes,
-					loadedBytes: currentLoaded,
-					totalFiles: progressTracker.totalChunks,
-					completedFiles: progressTracker.getCompletedChunks(),
-					percentage,
-					currentFile: rc.path,
-					message: `Downloading ${rc.path}...`
-				});
-			});
-		}
-
-		const bytes = await op.finished;
-		progressTracker?.onChunkDownloadComplete(bytes.length);
-
 		context.reportProgress({
 			phase: 'extracting',
-			totalBytes: progressTracker?.totalBytes,
-			loadedBytes: progressTracker ? progressTracker.getCompletedBytes() : bytes.length,
-			totalFiles: progressTracker?.totalChunks,
-			completedFiles: progressTracker?.getCompletedChunks(),
-			percentage:
-				progressTracker && progressTracker.totalBytes > 0
-					? Math.min(
-							100,
-							Math.round((progressTracker.getCompletedBytes() / progressTracker.totalBytes) * 100)
-						)
-					: 0,
+			totalBytes: pull.totalBytes,
+			loadedBytes: this.pullLoadedBytes(pull),
+			totalFiles: pull.totalChunks,
+			completedFiles: pull.completedChunks,
+			percentage: this.pullPercentage(pull),
 			currentFile: rc.path,
 			message: `Extracting ${rc.path}...`
 		});
@@ -849,8 +881,13 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 
 			const totalChunks = chunksToDownload.length;
 			const totalBytes = chunksToDownload.reduce((acc, c) => acc + (c.size ?? 0), 0);
-			let completedBytes = 0;
-			let completedChunks = 0;
+			const pull: PullProgress = {
+				totalBytes,
+				totalChunks,
+				completedBytes: 0,
+				completedChunks: 0,
+				inFlightLoaded: new Map()
+			};
 
 			if (totalChunks > 0) {
 				context.reportProgress({
@@ -864,27 +901,35 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 				});
 			}
 
-			await chunksToDownload.reduce(async (promise, rc) => {
-				await promise;
-				await this.downloadAndExtractChunk(
-					context,
-					rc,
-					metadata,
-					conflicts,
-					created,
-					updated,
-					{
-						totalBytes,
-						totalChunks,
-						getCompletedBytes: () => completedBytes,
-						getCompletedChunks: () => completedChunks,
-						onChunkDownloadComplete: (chunkBytesLength: number) => {
-							completedBytes += rc.size || chunkBytesLength;
-							completedChunks++;
-						}
-					}
-				);
-			}, Promise.resolve());
+			// Downloads overlap (network-bound) but extraction is strictly in chunk order: later chunks
+			// must override earlier ones in metadata, `created`/`updated` and conflict sidecars. Each
+			// worker keeps its slot until its extract finishes, so at most MAX_PREFETCH_CHUNKS + 1
+			// chunks are in memory: one being decrypted plus the prefetched ones.
+			const extractTurns: Array<Promise<void>> = [];
+			await mapLimit(
+				chunksToDownload.map((rc, index) => ({ rc, index })),
+				MAX_PREFETCH_CHUNKS + 1,
+				async ({ rc, index }: { rc: RemoteChunkInfo; index: number }) => {
+					// mapLimit starts workers in order, so `extractTurns[index - 1]` is always set by now.
+					const download = this.downloadChunk(context, rc, pull);
+					extractTurns[index] = (async () => {
+						const bytes = await download;
+						// Rejects if an earlier chunk failed, so this worker stops instead of extracting out of order.
+						await extractTurns[index - 1];
+						await this.extractChunk(
+							context,
+							rc,
+							bytes,
+							metadata,
+							conflicts,
+							created,
+							updated,
+							pull
+						);
+					})();
+					await extractTurns[index];
+				}
+			);
 
 			// ==========================================
 			// Phase 2: Apply Cumulative Deletions
@@ -939,12 +984,12 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 				// Estimate how many chunks we'll produce so the upload bar can span all of them.
 				// The active chunk already has some uncompressed content, so its available
 				// headroom is subtracted before dividing the remaining dirty bytes.
-				const totalDirtyBytes = dirtyPaths.reduce(
-					(sum, p) => sum + (localFiles[p]?.size ?? 0),
-					0
-				);
+				const totalDirtyBytes = dirtyPaths.reduce((sum, p) => sum + (localFiles[p]?.size ?? 0), 0);
 				const existingActiveBytes = activeChunk.uncompressedSize ?? 0;
-				const bytesNeedingNewChunks = Math.max(0, totalDirtyBytes - (this.chunkSizeLimit - existingActiveBytes));
+				const bytesNeedingNewChunks = Math.max(
+					0,
+					totalDirtyBytes - (this.chunkSizeLimit - existingActiveBytes)
+				);
 				// +1 for the active chunk itself; extra full chunks round up.
 				const estimatedChunks = 1 + Math.ceil(bytesNeedingNewChunks / this.chunkSizeLimit);
 				// Use raw uncompressed bytes as the estimate — localFiles[p].size is the

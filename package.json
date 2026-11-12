@@ -50,6 +50,7 @@
 		"@sveltejs/kit": "^2.63.0",
 		"@sveltejs/package": "^2.5.8",
 		"@sveltejs/vite-plugin-svelte": "^7.1.2",
+		"@types/async": "^3.2.25",
 		"@types/node": "^24",
 		"@vitest/browser": "^4.1.10",
 		"@vitest/browser-playwright": "^4.1.10",
@@ -76,6 +77,7 @@
 	"dependencies": {
 		"@aws-sdk/client-s3": "^3.1111.0",
 		"@aws-sdk/xhr-http-handler": "^3.0.0",
+		"async": "^3.2.6",
 		"dropbox": "^10.45.0",
 		"js7z-tools": "2.5.0",
 		"pathe": "^2.0.3"
