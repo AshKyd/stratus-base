@@ -12,6 +12,27 @@ import { MiddlewareZipChunk } from 'stratus-base';
 import { S3Storage } from 'stratus-base';
 ```
 
+### WASM setup (for `MiddlewareZipChunk`)
+
+Archives use a 7-Zip WebAssembly build that your app serves. Without setup it loads a
+single-threaded copy from a CDN. To self-host (required under a strict CSP) and enable
+multi-threading:
+
+```bash
+node node_modules/stratus-base/scripts/publish-wasm.mjs static/wasm
+```
+
+```typescript
+import { configureWasm } from 'stratus-base';
+
+// Call in the main thread and in every worker that reads or writes archives.
+configureWasm({ baseUrl: '/wasm', threads: 'auto' });
+```
+
+Multi-threading needs the headers `Cross-Origin-Opener-Policy: same-origin` and
+`Cross-Origin-Embedder-Policy: require-corp`; `threads: 'auto'` falls back to single-threaded
+without them. See the README's "WASM files" section for details.
+
 ---
 
 ## 2. Choosing and Initialising a Backend

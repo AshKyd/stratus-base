@@ -7,7 +7,7 @@ import type {
 	ChunkMetadata
 } from '../../StratusBase.ts';
 import { SyncConflictError } from '../../StratusBase.ts';
-import { SevenZipWriter, SevenZipReader, getJS7zWasmByteLength } from '../../utils/codec7z.ts';
+import { SevenZipWriter, SevenZipReader, probeJS7z } from '../../utils/codec7z.ts';
 import { normalisePath, isConflictSidecar } from '../../utils/normalisePath.ts';
 
 /** What the remote listing tells us about a chunk, used to decide whether our cached copy is stale. */
@@ -26,7 +26,7 @@ export interface MiddlewareZipChunkOptions {
 
 /** Ordered steps the 7z smoke test walks through, for step-by-step debug logging. */
 export type SmokeTestStep =
-	| 'decode-wasm-binary'
+	| 'load-wasm'
 	| 'construct-writer'
 	| 'write-entry'
 	| 'finalize-archive'
@@ -142,9 +142,8 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 	 * verifies the extracted content matches what was originally written.
 	 *
 	 * This is **not** part of the sync pipeline — its only purpose is to confirm that the
-	 * vendored single-threaded js7z WASM binary resolves and initializes correctly in this
-	 * project's build configuration (Vite / ESBuild / etc.). If this method throws, the
-	 * WASM file path is likely misconfigured.
+	 * js7z WASM files resolve and initialise from the path given to `configureWasm`. If this
+	 * method throws, that path (or the COOP/COEP headers, for multi-threaded) is likely wrong.
 	 *
 	 * Pass `onStep` to observe each stage as it happens (e.g. to `console.debug` from a
 	 * calling app) — this pinpoints exactly which stage a "wasm module not found" style
@@ -172,9 +171,9 @@ export class MiddlewareZipChunk implements StratusMiddleware {
 			}
 		};
 
-		// 0. Decode the wasm binary before touching any wasm code, so a build that dropped or
-		// mangled the vendored payload is visible up front rather than as a later hang.
-		await runStep('decode-wasm-binary', undefined, () => getJS7zWasmByteLength());
+		// 0. Load the glue and check the wasm file is reachable before touching any wasm code, so a
+		// wrong `configureWasm` path is reported up front rather than as a later hang.
+		await runStep('load-wasm', undefined, () => probeJS7z());
 
 		// 1. Build archive in memory
 		const writer = await runStep(

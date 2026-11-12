@@ -7,10 +7,10 @@ reproduced here as required.
 
 ## 7-Zip / JS7z
 
-This project vendors a single-threaded WebAssembly build of
-[7-Zip](https://www.7-zip.org/) by Igor Pavlov, via
-[JS7z](https://github.com/GMH-Code/JS7z) (`js7z-st-fs-ec`), at
-`src/lib/vendor/js7z/`.
+This project ships WebAssembly builds of [7-Zip](https://www.7-zip.org/) by Igor Pavlov, via
+[JS7z](https://github.com/GMH-Code/JS7z): the single-threaded `js7z-st-fs-ec` in `wasm/single/`,
+and the multi-threaded build from the `js7z-tools` npm package, copied to a consumer's
+public folder by `scripts/publish-wasm.mjs`.
 
 7-Zip is licensed under the **GNU Lesser General Public License v2.1 (LGPL)**,
 with portions under the BSD 3-clause, BSD 2-clause, and unRAR licenses.

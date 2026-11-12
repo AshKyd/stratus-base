@@ -1,4 +1,4 @@
-// Vendored single-threaded build of JS7z (7-Zip 25.01, ST+FS+EC variant).
+// Minimal typings for the parts of the js7z (7-Zip 25.01) Emscripten module we use.
 // Source: https://github.com/GMH-Code/JS7z — license in licenses/7-zip-LICENSE.txt.
 
 export interface JS7zFS {
@@ -19,6 +19,4 @@ export interface JS7zInstance {
 	onAbort?: (reason?: string) => void;
 }
 
-declare function JS7z(moduleArg?: Record<string, unknown>): Promise<JS7zInstance>;
-
-export default JS7z;
+export type JS7zFactory = (moduleArg?: Record<string, unknown>) => Promise<JS7zInstance>;

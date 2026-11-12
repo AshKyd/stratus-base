@@ -1,4 +1,5 @@
-import type { JS7zInstance } from '../vendor/js7z/js7z.cjs.d.ts';
+import type { JS7zFactory, JS7zInstance } from './js7zTypes.ts';
+import { chooseWasmVariant, getWasmConfig, resolveBaseUrl, type WasmVariant } from './wasmConfig.ts';
 import { generateSecureRandomBytes, secureRandomInt, MAX_RANDOM_BYTES_PER_CALL } from './crypto.ts';
 
 export interface SevenZipEntry {
@@ -45,50 +46,84 @@ const PADDING_PATH_PREFIX = '.stratus-padding-';
 
 const isNode = typeof process !== 'undefined' && !!process.versions?.node;
 
-// Two copies of the same vendored build are kept: `js7z.cjs` (real CommonJS, so Node's
-// native ESM/CJS interop loads it correctly) and `js7z.mjs` (real ESM, so Vite's dev server
-// doesn't have to interop a local relative-path CJS file — which it does incorrectly,
-// throwing "doesn't provide an export named: 'default'"). Loaded lazily so neither module
-// is evaluated in the environment it isn't meant for.
-let js7zFactoryPromise:
-	Promise<(moduleArg?: Record<string, unknown>) => Promise<JS7zInstance>> | undefined;
-
-function loadJS7zFactory() {
-	js7zFactoryPromise ??= isNode
-		? // @vite-ignore — this branch never runs in a browser bundle (isNode is always
-			// false there); skip static analysis so bundlers don't try to pull the
-			// Node-only CJS build into the client build.
-			import(/* @vite-ignore */ '../vendor/js7z/js7z.cjs').then((mod) => mod.default)
-		: import('../vendor/js7z/js7z.mjs').then((mod) => mod.default);
-	return js7zFactoryPromise;
+// The wasm is not bundled. The consumer serves it and says where via `configureWasm`
+// (see wasmConfig.ts); the default is a CDN copy. The glue is an ES module loaded by URL at
+// runtime, so no bundler has to resolve a wasm asset. The glue's own `import.meta.url` is how
+// the multi-threaded build starts its pthread workers, hence `multi` must be same-origin.
+interface LoadedFactory {
+	factory: JS7zFactory;
+	/** Wasm location for Emscripten's `locateFile`; unset when the package resolves its own. */
+	moduleUrl?: URL;
+	variant: WasmVariant;
 }
 
-// The wasm is vendored base64-encoded inside a plain ESM module rather than shipped as a .wasm
-// asset. Emscripten takes the bytes directly via `wasmBinary`, so nothing downstream has to
-// resolve an asset URL at runtime — no `?url` import, no `locateFile`, no `import.meta.url`.
-// That keeps the published `dist/` free of bundler-specific syntax, so Vite, other bundlers and
-// plain Node all load it identically. Imported lazily so the ~2MB payload stays in its own async
-// chunk and is only fetched when an archive is actually read or written.
-let js7zWasmBinaryPromise: Promise<Uint8Array> | undefined;
+let loadedFactoryPromise: Promise<LoadedFactory> | undefined;
+let loadedFactoryRevision = -1;
 
-function loadJS7zWasmBinary() {
-	js7zWasmBinaryPromise ??= import('../vendor/js7z/js7z-wasm.js').then(({ default: base64 }) =>
-		// `atob` is a global in browsers and in Node 16+.
-		Uint8Array.from(atob(base64), (character) => character.charCodeAt(0))
+async function loadFactory(): Promise<LoadedFactory> {
+	// Node: the `js7z-tools` package (multi-threaded build) straight from node_modules. It works
+	// without cross-origin isolation, and the specifier is held in a variable so browser bundles
+	// never try to pull it in.
+	if (isNode) {
+		const nodePackageName = 'js7z-tools';
+		const { default: factory } = await import(/* @vite-ignore */ nodePackageName);
+		return { factory, variant: 'multi' };
+	}
+
+	const config = getWasmConfig();
+	const variant = chooseWasmVariant(config);
+	const moduleUrl = new URL(`${variant}/js7z.mjs`, resolveBaseUrl(config.baseUrl));
+	const { default: factory } = await import(/* @vite-ignore */ moduleUrl.href).catch(
+		(cause: unknown) => {
+			throw new Error(
+				`Could not load the ${variant}-threaded js7z wasm from ${moduleUrl.href}. ` +
+					`Call configureWasm({ baseUrl }) with the folder you published the wasm files to.`,
+				{ cause }
+			);
+		}
 	);
-	return js7zWasmBinaryPromise;
+	return { factory, moduleUrl, variant };
 }
 
-/** Size in bytes of the decoded js7z wasm binary, exposed for diagnostics/logging. */
-export async function getJS7zWasmByteLength(): Promise<number> {
-	return (await loadJS7zWasmBinary()).length;
+/** Loads the glue once per configuration; `configureWasm` invalidates it. */
+function getFactory(): Promise<LoadedFactory> {
+	const { revision } = getWasmConfig();
+	if (!loadedFactoryPromise || loadedFactoryRevision !== revision) {
+		loadedFactoryRevision = revision;
+		loadedFactoryPromise = loadFactory();
+		// A failed load (bad path, offline) must not stick; the next call retries.
+		loadedFactoryPromise.catch(() => {
+			loadedFactoryPromise = undefined;
+		});
+	}
+	return loadedFactoryPromise;
 }
 
-/** Loads the js7z glue and its wasm binary together, and instantiates the module. */
+/**
+ * Loads the glue and checks the wasm file is reachable, without instantiating it. Reports which
+ * build is in use and where it came from, for diagnostics and the smoke test.
+ */
+export async function probeJS7z(): Promise<{ variant: WasmVariant; url: string }> {
+	const { variant, moduleUrl } = await getFactory();
+	if (!moduleUrl) return { variant, url: 'js7z-tools (node_modules)' };
+
+	const wasmUrl = new URL('js7z.wasm', moduleUrl);
+	const response = await fetch(wasmUrl, { method: 'HEAD' });
+	if (!response.ok) {
+		throw new Error(`js7z wasm not found at ${wasmUrl.href} (HTTP ${response.status})`);
+	}
+	return { variant, url: wasmUrl.href };
+}
+
 async function createJS7z(): Promise<JS7zInstance> {
-	const [JS7z, wasmBinary] = await Promise.all([loadJS7zFactory(), loadJS7zWasmBinary()]);
-	return JS7z({ wasmBinary });
+	const { factory, moduleUrl } = await getFactory();
+	// The glue can't reliably find its wasm itself in a worker (its location is the worker's),
+	// so point at it explicitly, next to the glue file.
+	return factory(moduleUrl ? { locateFile: (file: string) => new URL(file, moduleUrl).href } : {});
 }
+
+/** Copies bytes off the wasm heap. With the multi-threaded build that heap is a SharedArrayBuffer. */
+const copyOffHeap = (bytes: Uint8Array): Uint8Array => new Uint8Array(bytes);
 
 export class SevenZipWriter {
 	private password?: string;
@@ -175,7 +210,7 @@ export class SevenZipWriter {
 					return;
 				}
 				try {
-					resolve(js7z.FS.readFile(archivePath));
+					resolve(copyOffHeap(js7z.FS.readFile(archivePath)));
 				} catch (err) {
 					reject(err);
 				}
@@ -361,7 +396,7 @@ export class SevenZipReader {
 				fs.unlink(fullPath);
 				continue;
 			}
-			const data = fs.readFile(fullPath);
+			const data = copyOffHeap(fs.readFile(fullPath));
 			yield {
 				path: relativePath,
 				data

@@ -38,7 +38,9 @@ export type {
 	SmokeTestStep,
 	SmokeTestStepReporter
 } from './middleware/MiddlewareZipChunk/MiddlewareZipChunk.ts';
-export { SevenZipWriter, SevenZipReader, getJS7zWasmByteLength } from './utils/codec7z.ts';
+export { SevenZipWriter, SevenZipReader, probeJS7z } from './utils/codec7z.ts';
+export { configureWasm, DEFAULT_WASM_BASE_URL } from './utils/wasmConfig.ts';
+export type { WasmConfig, WasmVariant } from './utils/wasmConfig.ts';
 export type { SevenZipEntry, SevenZipOptions, PaddingOptions } from './utils/codec7z.ts';
 
 export { MemoryStorage } from './backends/MemoryStorage.ts';
